@@ -1,0 +1,14 @@
+[Unit]
+Description=MosDNS Service
+After=network.target
+OnFailure=mosdns-rescue.service
+[Service]
+StartLimitInterval=0
+Type=simple
+ExecStartPre=-/usr/local/bin/mosctl rescue disable silent
+ExecStart=/usr/local/bin/mosdns start -d /etc/mosdns
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,120 @@
+log:
+  level: info
+  file: "/var/log/mosdns.log"
+
+api:
+  http: "127.0.0.1:8080"
+
+plugins:
+  # 基础缓存
+  - tag: cache
+    type: cache
+    args:
+      size: 20480
+      lazy_cache_ttl: 86400
+      dump_file: "/etc/mosdns/cache.dump"
+      dump_interval: 600
+
+  # 国内上游
+  - tag: forward_local
+    type: forward
+    args:
+      upstreams:
+        - addr: "udp://119.29.29.29" # TAG_LOCAL
+          enable_pipeline: true
+
+  # 国外上游
+  - tag: forward_remote
+    type: forward
+    args:
+      upstreams:
+        - addr: "8.8.8.8:53" # TAG_REMOTE
+
+  # 强制国内 + 国内域名规则
+  - tag: geosite_cn
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/geosite_cn.txt"
+        - "/etc/mosdns/rules/force-cn.txt"
+
+  # 强制国外 + 国外域名规则
+  - tag: geosite_no_cn
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/geosite_no_cn.txt"
+        - "/etc/mosdns/rules/force-nocn.txt"
+
+  # 本地 hosts，规则定义排序放在最后，执行时仍优先用于本地覆盖
+  - tag: hosts
+    type: hosts
+    args:
+      files:
+        - "/etc/mosdns/rules/hosts.txt"
+
+  - tag: has_resp_sequence
+    type: sequence
+    args:
+      - matches: has_resp
+        exec: accept
+
+  - tag: no_ecs
+    type: ecs_handler
+    args:
+      forward: false
+      preset: ""
+      send: false
+
+  - tag: cached_local_sequence
+    type: sequence
+    args:
+      - exec: $cache
+      - matches: has_resp
+        exec: accept
+      - exec: $forward_local
+
+  - tag: forward_remote_upstream
+    type: sequence
+    args:
+      - exec: $no_ecs
+      - exec: prefer_ipv4
+      - exec: $forward_remote
+
+  - tag: query_is_local_domain
+    type: sequence
+    args:
+      - matches: qname $geosite_cn
+        exec: $cached_local_sequence
+
+  - tag: query_is_no_local_domain
+    type: sequence
+    args:
+      - matches: qname $geosite_no_cn
+        exec: $forward_remote_upstream
+
+  - tag: main_sequence
+    type: sequence
+    args:
+      - exec: $hosts
+      - exec: jump has_resp_sequence
+
+      - exec: $query_is_local_domain
+      - exec: jump has_resp_sequence
+
+      - exec: $query_is_no_local_domain
+      - exec: jump has_resp_sequence
+
+      - exec: $forward_remote_upstream
+
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: main_sequence
+      listen: ":53"
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: main_sequence
+      listen: ":53"

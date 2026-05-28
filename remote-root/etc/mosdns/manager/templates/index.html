@@ -1,0 +1,1549 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mosctl 管理面板</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
+  <link rel="icon" href="{{ url_for('static', filename='mosctl-logo.svg') }}" type="image/svg+xml">
+  <link rel="icon" href="{{ url_for('static', filename='mosctl-logo-512.png') }}" type="image/png" sizes="512x512">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='mosctl-logo-512.png') }}">
+  <style>
+    :root {
+      --bg: #f4f6fa;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --text: #101828;
+      --muted: #667085;
+      --line: #d7dee9;
+      --primary: #2563eb;
+      --primary-soft: #eef4ff;
+      --green: #168a4a;
+      --green-soft: #ecfdf3;
+      --amber: #a16207;
+      --amber-soft: #fffbeb;
+      --red: #c2410c;
+      --red-strong: #dc2626;
+      --red-soft: #fff1f2;
+      --code: #111827;
+      --shadow: 0 12px 34px rgba(16, 24, 40, .08);
+    }
+    * { box-sizing: border-box; }
+    html {
+      scroll-behavior: smooth;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+    .skip-link {
+      position: fixed;
+      left: 16px;
+      top: 12px;
+      z-index: 1000;
+      transform: translateY(-140%);
+      border-radius: 8px;
+      background: var(--primary);
+      color: #fff;
+      padding: 10px 14px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .skip-link:focus {
+      transform: translateY(0);
+      outline: 3px solid rgba(37, 99, 235, .22);
+    }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 248px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      border-right: 1px solid var(--line);
+      background: var(--surface);
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 42px;
+      padding: 0 6px;
+    }
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: block;
+      box-shadow: 0 8px 18px rgba(37, 99, 235, .22);
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+    .brand-sub {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 164px;
+    }
+    .nav {
+      display: grid;
+      gap: 6px;
+    }
+    .tab {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text);
+      padding: 0 12px;
+      text-align: left;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background-color .16s ease, border-color .16s ease, color .16s ease;
+    }
+    .tab:hover {
+      background: var(--surface-soft);
+      border-color: var(--line);
+    }
+    .tab.active {
+      color: var(--primary);
+      background: var(--primary-soft);
+      border-color: #bfdbfe;
+    }
+    .tab:focus-visible,
+    button:focus-visible,
+    .link-btn:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible {
+      outline: 3px solid rgba(37, 99, 235, .22);
+      outline-offset: 2px;
+    }
+    .sidebar-foot {
+      margin-top: auto;
+      display: grid;
+      gap: 8px;
+    }
+    .content {
+      min-width: 0;
+      padding: 18px;
+    }
+    .topbar {
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .page-title h2 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+    .page-title p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .view { display: none; }
+    .view.active { display: block; }
+    .grid-2, .grid-3, .grid-4 {
+      display: grid;
+      gap: 12px;
+    }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .section-head {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 4px 2px 0;
+    }
+    .section-head h3 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+    .section-head p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .panel.span-2 { grid-column: 1 / -1; }
+    .panel, .stat {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+    }
+    .panel {
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    details.panel > summary {
+      min-height: 44px;
+      cursor: pointer;
+      font-weight: 700;
+      list-style-position: inside;
+    }
+    details.panel > summary + .panel-note {
+      margin-top: 4px;
+      margin-bottom: 14px;
+    }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .panel h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0;
+    }
+    .panel-note, .hint {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .stat {
+      min-height: 104px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .stat-label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .stat-value {
+      margin-top: 8px;
+      font-size: 22px;
+      line-height: 1.15;
+      font-weight: 850;
+      overflow-wrap: anywhere;
+    }
+    .stat-foot {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .ok { color: var(--green); }
+    .warn { color: var(--amber); }
+    .bad { color: var(--red-strong); }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .input-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .sync-test-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .sync-test-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px 12px;
+    }
+    .sync-test-peer {
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+    .sync-test-message {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .sync-test-status {
+      font-size: 12px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    button, .link-btn {
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      padding: 0 12px;
+      font: inherit;
+      font-weight: 750;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      white-space: nowrap;
+      touch-action: manipulation;
+      transition: background-color .16s ease, border-color .16s ease, color .16s ease, opacity .16s ease;
+    }
+    button:hover, .link-btn:hover {
+      background: var(--surface-soft);
+      border-color: #b8c4d6;
+    }
+    button:disabled {
+      opacity: .58;
+      cursor: wait;
+    }
+    .primary {
+      color: #fff;
+      background: var(--primary);
+      border-color: var(--primary);
+    }
+    .primary:hover {
+      background: #1d4ed8;
+      border-color: #1d4ed8;
+    }
+    .soft {
+      color: var(--primary);
+      background: var(--primary-soft);
+      border-color: #bfdbfe;
+    }
+    .soft-danger {
+      color: #991b1b;
+      background: var(--red-soft);
+      border-color: #fecaca;
+    }
+    .danger {
+      color: #fff;
+      background: var(--red-strong);
+      border-color: var(--red-strong);
+    }
+    .danger:hover {
+      background: #b91c1c;
+      border-color: #b91c1c;
+    }
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 7px;
+    }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+    input, select {
+      height: 44px;
+      padding: 0 11px;
+    }
+    input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+    }
+    textarea {
+      min-height: 380px;
+      padding: 12px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, .14);
+    }
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .field {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--surface);
+    }
+    .field-title {
+      margin: 0 0 10px;
+      font-size: 14px;
+      font-weight: 850;
+    }
+    .preset-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .preset-row button {
+      min-height: 36px;
+      font-size: 13px;
+    }
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      color: var(--text);
+      font-weight: 750;
+    }
+    .compact-textarea { min-height: 96px; }
+    .rule-layout {
+      display: grid;
+      grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+    .help-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 14px;
+    }
+    .help-box h4 {
+      margin: 16px 0 10px;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    .help-text {
+      margin: 0 0 10px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    pre {
+      margin: 0;
+      min-height: 260px;
+      max-height: 520px;
+      overflow: auto;
+      border-radius: 8px;
+      padding: 14px;
+      color: #dbeafe;
+      background: var(--code);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
+    }
+    .dashboard-log {
+      min-height: 320px;
+      max-height: 420px;
+    }
+    .example-box {
+      min-height: 0;
+      max-height: none;
+      margin-top: 10px;
+      background: var(--surface-soft);
+      color: var(--text);
+      border: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .backup-list {
+      display: grid;
+      gap: 8px;
+    }
+    .backup-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+    }
+    .backup-name {
+      font-weight: 850;
+      overflow-wrap: anywhere;
+    }
+    .backup-meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      border-radius: 999px;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 850;
+      background: var(--primary-soft);
+      color: #1d4ed8;
+    }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 20;
+      width: min(520px, calc(100vw - 36px));
+      display: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+    .toast.show { display: block; }
+    .toast-title {
+      font-weight: 850;
+      margin-bottom: 8px;
+    }
+    .toast-body {
+      color: var(--muted);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 280px;
+      overflow: auto;
+    }
+    @media (max-width: 980px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .tab { text-align: center; }
+      .sidebar-foot {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .input-actions {
+        grid-template-columns: 1fr;
+      }
+      .grid-2, .grid-3, .grid-4, .field-grid, .rule-layout, .backup-item {
+        grid-template-columns: 1fr;
+      }
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .toolbar { justify-content: flex-start; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        transition-duration: .01ms !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="{{ url_for('static', filename='mosctl-logo.svg') }}" alt="Mosctl">
+        <div>
+          <h1>Mosctl</h1>
+          <div class="brand-sub" id="versionText">正在读取状态</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="页面切换">
+        <button type="button" class="tab active" data-view="dashboard" aria-current="page" onclick="showView('dashboard')">概览</button>
+        <button type="button" class="tab" data-view="settings" onclick="showView('settings')">基础设置</button>
+        <button type="button" class="tab" data-view="rules" onclick="showView('rules')">分流规则</button>
+        <button type="button" class="tab" data-view="maintenance" onclick="showView('maintenance')">维护</button>
+        <button type="button" class="tab" data-view="advanced" onclick="showView('advanced')">高级</button>
+      </nav>
+      <div class="sidebar-foot">
+        <a class="link-btn" href="/logout">退出</a>
+      </div>
+    </aside>
+
+    <main class="content" id="mainContent" tabindex="-1">
+      <div class="topbar">
+        <div class="page-title">
+          <h2 id="pageTitle">概览</h2>
+          <p id="pageSubtitle">运行状态与常用操作</p>
+        </div>
+        <div class="toolbar">
+          <button type="button" onclick="loadAll()">刷新状态</button>
+        </div>
+      </div>
+
+      <section class="grid-4" style="margin-bottom: 12px;">
+        <div class="stat">
+          <div>
+            <div class="stat-label">服务状态</div>
+            <div class="stat-value" id="serviceState">--</div>
+          </div>
+          <div class="stat-foot">mosdns.service</div>
+        </div>
+        <div class="stat">
+          <div>
+            <div class="stat-label">救援模式</div>
+            <div class="stat-value" id="rescueState">--</div>
+          </div>
+          <div class="stat-foot">DNS 转发保护</div>
+        </div>
+        <div class="stat">
+          <div>
+            <div class="stat-label">缓存时间</div>
+            <div class="stat-value" id="cacheState">--</div>
+          </div>
+          <div class="stat-foot">lazy_cache_ttl</div>
+        </div>
+        <div class="stat">
+          <div>
+            <div class="stat-label">内核版本</div>
+            <div class="stat-value" id="versionState">--</div>
+          </div>
+          <div class="stat-foot">mosdns core</div>
+        </div>
+      </section>
+
+      <section class="view active" id="view-dashboard">
+        <div class="grid-3">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>国内上游</h3>
+                <div class="panel-note">TAG_LOCAL</div>
+              </div>
+            </div>
+            <div class="stat-value" id="dashLocalDns">--</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>国外上游</h3>
+                <div class="panel-note">TAG_REMOTE</div>
+              </div>
+            </div>
+            <div class="stat-value" id="dashRemoteDns">--</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>常用操作</h3>
+                <div class="panel-note">高风险操作在高级页</div>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" onclick="control('restart')">重启</button>
+              <button type="button" onclick="control('flush')">清空缓存</button>
+              <button type="button" onclick="control('test')">DNS 诊断</button>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>运行日志</h3>
+              <div class="panel-note">最近 80 行，最新在上，自动刷新</div>
+            </div>
+            <div class="actions">
+              <button type="button" onclick="loadDashboardLogs()">刷新日志</button>
+            </div>
+          </div>
+          <pre class="dashboard-log" id="dashboardLogs">正在读取日志</pre>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>基础设置</h3>
+              <div class="panel-note">界面只填 IP，保存时自动写成 mosdns 需要的地址格式</div>
+            </div>
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <div class="field-title">国内域名上游</div>
+              <label for="local_dns">DNS 服务器 IP</label>
+              <input id="local_dns" spellcheck="false" placeholder="119.29.29.29">
+              <div class="hint">保存时写入 udp://地址。</div>
+            </div>
+            <div class="field">
+              <div class="field-title">国外域名上游</div>
+              <label for="remote_dns">DNS 服务器 IP</label>
+              <input id="remote_dns" spellcheck="false" placeholder="8.8.8.8">
+              <div class="hint">保存时补 53 端口。</div>
+            </div>
+            <div class="field">
+              <div class="field-title">DNS 缓存</div>
+              <label for="ttl">TTL 秒数</label>
+              <input id="ttl" inputmode="numeric" spellcheck="false">
+              <div class="preset-row">
+                <button type="button" onclick="setTtl(3600)">1 小时</button>
+                <button type="button" onclick="setTtl(86400)">1 天</button>
+                <button type="button" onclick="setTtl(604800)">7 天</button>
+              </div>
+            </div>
+          </div>
+          <div class="actions" style="margin-top: 14px;">
+            <button type="button" class="primary" onclick="saveSettings()">保存并重启</button>
+            <button type="button" onclick="loadSettings()">重新读取</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-rules">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>分流规则</h3>
+              <div class="panel-note">只有强制国内、强制国外会参与多节点同步</div>
+            </div>
+          </div>
+          <div class="rule-layout">
+            <div class="help-box">
+              <label for="ruleSelect">规则类型</label>
+              <select id="ruleSelect" onchange="loadRule()">
+                {% for rule_id, meta in rule_files.items() %}
+                  <option value="{{ rule_id }}">{{ meta.label }}</option>
+                {% endfor %}
+              </select>
+              <h4 id="ruleTitle">--</h4>
+              <p class="help-text" id="ruleSummary">--</p>
+              <p class="help-text" id="ruleFormat">--</p>
+              <pre class="example-box" id="ruleExample"></pre>
+              <div class="actions" style="margin-top: 12px;">
+                <button type="button" onclick="appendRuleExample()">插入示例</button>
+              </div>
+            </div>
+            <div>
+              <textarea id="ruleContent" spellcheck="false"></textarea>
+              <div class="actions" style="margin-top: 12px;">
+                <button type="button" class="primary" onclick="saveRule()">保存规则并重启</button>
+                <button type="button" onclick="loadRule()">重新读取</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-maintenance">
+        <div class="grid-2">
+          <div class="section-head">
+            <div>
+              <h3>Geo 数据</h3>
+              <p>更新基础库、设置更新时间和更新来源。</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>手动维护</h3>
+                <div class="panel-note">立即执行一次常用维护动作，不会覆盖主配置</div>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" onclick="control('update')">更新 Geo 数据</button>
+              <button type="button" onclick="control('flush')">清空缓存</button>
+              <button type="button" onclick="control('test')">DNS 诊断</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>Geo 自动更新</h3>
+                <div class="panel-note" id="geoScheduleSummary">正在读取定时设置</div>
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <div class="field-title">更新频率</div>
+                <label for="geoScheduleMode">多久更新一次</label>
+                <select id="geoScheduleMode" onchange="updateGeoScheduleFields()">
+                  <option value="daily">每天一次</option>
+                  <option value="every_12h">每 12 小时</option>
+                  <option value="every_6h">每 6 小时</option>
+                  <option value="weekly">每周一次</option>
+                  <option value="disabled">关闭自动更新</option>
+                </select>
+              </div>
+              <div class="field">
+                <div class="field-title">执行时间</div>
+                <label for="geoScheduleTime">从几点开始</label>
+                <input id="geoScheduleTime" type="time" value="02:00">
+              </div>
+              <div class="field" id="geoScheduleWeekdayField">
+                <div class="field-title">每周日期</div>
+                <label for="geoScheduleWeekday">星期几更新</label>
+                <select id="geoScheduleWeekday">
+                  <option value="1">周一</option>
+                  <option value="2">周二</option>
+                  <option value="3">周三</option>
+                  <option value="4">周四</option>
+                  <option value="5">周五</option>
+                  <option value="6">周六</option>
+                  <option value="0">周日</option>
+                </select>
+              </div>
+            </div>
+            <div class="actions" style="margin-top: 14px;">
+              <button type="button" class="primary" onclick="saveGeoSchedule()">保存自动更新</button>
+              <button type="button" onclick="loadGeoSchedule()">重新读取</button>
+            </div>
+          </div>
+          <div class="section-head">
+            <div>
+              <h3>规则同步</h3>
+              <p>只同步强制国内和强制国外，不同步本地 hosts。</p>
+            </div>
+          </div>
+          <div class="panel span-2">
+            <div class="panel-head">
+              <div>
+                <h3>强制规则同步</h3>
+                <div class="panel-note">只同步强制国内和强制国外</div>
+              </div>
+            </div>
+            <label class="check-row">
+              <input id="syncEnabled" type="checkbox">
+              <span>保存强制规则后同步到其他节点</span>
+            </label>
+            <label for="syncToken">同步密钥</label>
+            <div class="input-actions">
+              <input id="syncToken" spellcheck="false">
+              <button type="button" onclick="generateSyncToken()">随机生成</button>
+              <button type="button" onclick="copySyncToken()">复制</button>
+            </div>
+            <label for="syncPeers" style="margin-top: 12px;">其他 mosdns 面板地址</label>
+            <textarea class="compact-textarea" id="syncPeers" spellcheck="false" placeholder="http://10.10.10.6:7840&#10;http://10.10.20.6:7840"></textarea>
+            <div class="actions" style="margin-top: 12px;">
+              <button type="button" class="primary" onclick="saveSyncSettings()">保存同步设置</button>
+              <button type="button" onclick="testSyncPeers()">测试连通性</button>
+              <button type="button" onclick="loadSyncSettings()">重新读取</button>
+            </div>
+            <div class="sync-test-list" id="syncTestResults"></div>
+          </div>
+
+          <div class="section-head">
+            <div>
+              <h3>备份恢复</h3>
+              <p>查看、恢复和清理配置备份。</p>
+            </div>
+          </div>
+          <div class="panel span-2">
+            <div class="panel-head">
+              <div>
+                <h3>配置备份</h3>
+                <div class="panel-note">恢复失败会自动回滚到恢复前配置，旧备份会按保留数量自动清理</div>
+              </div>
+              <span class="pill" id="backupCount">--</span>
+            </div>
+            <div class="field-grid" style="margin-bottom: 12px;">
+              <div class="field">
+                <div class="field-title">保留数量</div>
+                <label for="backupKeepCount">最多保留几个配置备份</label>
+                <input id="backupKeepCount" inputmode="numeric" spellcheck="false">
+                <div class="hint">内核备份另外最多保留 3 个。</div>
+              </div>
+            </div>
+            <div class="actions" style="margin-bottom: 12px;">
+              <button type="button" class="primary" onclick="saveBackupSettings()">保存保留策略</button>
+              <button type="button" onclick="cleanupBackups()">清理旧备份</button>
+              <button type="button" onclick="loadBackups()">刷新备份</button>
+            </div>
+            <div class="backup-list" id="backupList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-advanced">
+        <div class="grid-2">
+          <div class="section-head">
+            <div>
+              <h3>服务控制</h3>
+              <p>会直接影响 mosdns 服务状态的操作。</p>
+            </div>
+          </div>
+          <div class="panel span-2">
+            <div class="panel-head">
+              <div>
+                <h3>服务与救援</h3>
+                <div class="panel-note">停止服务会让 DNS 不可用，救援模式仅用于临时兜底</div>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" onclick="control('start')">启动服务</button>
+              <button type="button" class="primary" onclick="control('restart')">重启服务</button>
+              <button type="button" class="danger" onclick="confirmStop()">停止服务</button>
+              <button type="button" class="soft-danger" onclick="control('rescue_on')">开启救援</button>
+              <button type="button" onclick="control('rescue_off')">关闭救援</button>
+            </div>
+          </div>
+
+          <div class="section-head">
+            <div>
+              <h3>面板登录</h3>
+              <p>修改 Web 管理面板的登录用户名和密码。</p>
+            </div>
+          </div>
+          <div class="panel span-2">
+            <div class="panel-head">
+              <div>
+                <h3>账号密码</h3>
+                <div class="panel-note">新密码留空则只修改用户名，不会回显当前密码</div>
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <div class="field-title">登录用户名</div>
+                <label for="accountUsername">用户名</label>
+                <input id="accountUsername" autocomplete="username" spellcheck="false">
+              </div>
+              <div class="field">
+                <div class="field-title">新密码</div>
+                <label for="accountPassword">留空不修改</label>
+                <input id="accountPassword" type="password" autocomplete="new-password">
+              </div>
+              <div class="field">
+                <div class="field-title">确认新密码</div>
+                <label for="accountPasswordConfirm">再次输入新密码</label>
+                <input id="accountPasswordConfirm" type="password" autocomplete="new-password">
+              </div>
+            </div>
+            <div class="actions" style="margin-top: 12px;">
+              <button type="button" class="primary" onclick="saveAccountSettings()">保存登录信息</button>
+              <button type="button" onclick="loadAccountSettings()">重新读取</button>
+            </div>
+          </div>
+
+          <div class="section-head">
+            <div>
+              <h3>内核与模板</h3>
+              <p>升级 mosdns 内核，或用内置模板恢复主配置。</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>内核升级</h3>
+                <div class="panel-note">下载官方 release，失败时自动回滚旧内核</div>
+              </div>
+            </div>
+            <div class="grid-2" style="margin-bottom: 12px;">
+              <div>
+                <label>当前版本</label>
+                <div class="pill" id="coreCurrent">--</div>
+              </div>
+              <div>
+                <label>官方 latest release</label>
+                <div class="pill" id="coreLatest">未检测</div>
+              </div>
+            </div>
+            <div class="hint" id="coreVersionHint" style="margin-bottom: 12px;">点击检测后显示官方 GitHub latest release；如果它不比当前版本新，升级会自动取消。</div>
+            <div class="actions">
+              <button type="button" onclick="checkCoreVersion()">检测最新版本</button>
+              <button type="button" class="soft-danger" onclick="confirmUpgradeCore()">升级 mosdns 内核</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>默认配置</h3>
+                <div class="panel-note">使用项目内置模板，保留当前上游和 TTL</div>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" class="soft-danger" onclick="confirmRestoreDefault()">恢复内置默认配置</button>
+            </div>
+          </div>
+
+          <div class="section-head">
+            <div>
+              <h3>完整配置</h3>
+              <p>直接编辑 config.yaml，适合排查或手动高级修改。</p>
+            </div>
+          </div>
+          <div class="panel span-2">
+            <div class="panel-head">
+              <div>
+                <h3>config.yaml</h3>
+                <div class="panel-note">保存后会重启 mosdns；建议先确认备份列表里有最近备份</div>
+              </div>
+            </div>
+            <textarea id="configContent" spellcheck="false"></textarea>
+            <div class="actions" style="margin-top: 12px;">
+              <button type="button" class="primary" onclick="saveConfig()">保存配置并重启</button>
+              <button type="button" onclick="loadConfig()">重新读取</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <div class="toast-title" id="toastTitle"></div>
+    <div class="toast-body" id="toastBody"></div>
+  </div>
+
+  <script>
+    const viewMeta = {
+      dashboard: ['概览', '运行状态与常用操作'],
+      settings: ['基础设置', '上游 DNS 与缓存时间'],
+      rules: ['分流规则', '编辑域名规则与同步强制规则'],
+      maintenance: ['维护', 'Geo 更新、规则同步与备份恢复'],
+      advanced: ['高级', '服务控制、内核模板与完整配置']
+    };
+    let activeView = 'dashboard';
+    let busy = false;
+    let currentRuleExample = '';
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function toast(title, body) {
+      $('toastTitle').textContent = title;
+      $('toastBody').textContent = body || '';
+      $('toast').classList.add('show');
+      clearTimeout(window.toastTimer);
+      window.toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5200);
+    }
+
+    function setBusy(next, text) {
+      busy = next;
+      document.querySelectorAll('button').forEach(button => {
+        if (!button.classList.contains('tab')) button.disabled = next;
+      });
+      const output = $('commandOutput');
+      if (output && next && text) output.textContent = text;
+    }
+
+    function showView(name) {
+      activeView = name;
+      document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(el => {
+        el.classList.remove('active');
+        el.removeAttribute('aria-current');
+      });
+      $('view-' + name).classList.add('active');
+      const activeTab = document.querySelector('[data-view="' + name + '"]');
+      activeTab.classList.add('active');
+      activeTab.setAttribute('aria-current', 'page');
+      $('pageTitle').textContent = viewMeta[name][0];
+      $('pageSubtitle').textContent = viewMeta[name][1];
+      if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+      if (name === 'dashboard') loadDashboardLogs();
+      if (name === 'advanced') {
+        loadAccountSettings();
+        loadConfig();
+      }
+      if (name === 'rules') loadRule();
+      if (name === 'settings') loadSettings();
+      if (name === 'maintenance') {
+        loadBackups();
+        loadBackupSettings();
+        loadSyncSettings();
+        loadGeoSchedule();
+      }
+    }
+
+    async function api(url, options) {
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        location.href = '/login';
+        return {};
+      }
+      return await res.json();
+    }
+
+    async function loadStatus() {
+      const res = await api('/api/status');
+      $('serviceState').textContent = res.running ? '运行中' : '已停止';
+      $('serviceState').className = 'stat-value ' + (res.running ? 'ok' : 'bad');
+      $('rescueState').textContent = res.rescue ? '已开启' : '未开启';
+      $('rescueState').className = 'stat-value ' + (res.rescue ? 'warn' : 'ok');
+      $('versionText').textContent = res.version_clean || res.version || '未知版本';
+      $('cacheState').textContent = formatTtl(res.ttl);
+      $('versionState').textContent = res.version_clean || res.version || '--';
+      $('coreCurrent').textContent = res.version_clean || res.version || '--';
+      $('dashLocalDns').textContent = res.local_dns || '--';
+      $('dashRemoteDns').textContent = res.remote_dns || '--';
+      $('local_dns').value = res.local_dns || '';
+      $('remote_dns').value = res.remote_dns || '';
+      $('ttl').value = res.ttl || '';
+    }
+
+    function formatTtl(value) {
+      const ttl = Number(value || 0);
+      if (!ttl) return '--';
+      if (ttl % 86400 === 0) return (ttl / 86400) + ' 天';
+      if (ttl % 3600 === 0) return (ttl / 3600) + ' 小时';
+      return ttl + ' 秒';
+    }
+
+    async function control(action) {
+      if (busy) return;
+      setBusy(true, '正在执行...');
+      try {
+        const res = await api('/api/control', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action})
+        });
+        const output = $('commandOutput');
+        if (output) output.textContent = res.message || '';
+        toast(res.success ? '操作完成' : '操作失败', res.message || '');
+        await loadStatus();
+        if (activeView === 'dashboard') await loadDashboardLogs();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function checkCoreVersion() {
+      if (busy) return;
+      setBusy(true, '正在检测 mosdns 最新版本...');
+      try {
+        const res = await api('/api/core-version');
+        $('coreCurrent').textContent = res.current_clean || res.current || '--';
+        $('coreLatest').textContent = res.latest_clean || res.latest || '获取失败';
+        if (res.success) {
+          const assetText = res.asset_available ? '当前架构安装包可用' : '未发现当前架构安装包';
+          $('coreVersionHint').textContent = assetText + (res.release_url ? ' · ' + res.release_url : '');
+          toast('检测完成', '当前版本：' + (res.current_clean || res.current || '--') + '\n最新版本：' + (res.latest_clean || res.latest || '--'));
+        } else {
+          $('coreVersionHint').textContent = res.message || '获取最新版本失败';
+          toast('检测失败', res.message || '');
+        }
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function confirmRestoreDefault() {
+      if (!confirm('恢复内置默认配置会替换当前 config.yaml，但会保留当前国内/国外上游和 TTL。系统会先校验模板，确定继续吗？')) return;
+      control('restore_default');
+    }
+
+    function confirmStop() {
+      if (!confirm('停止 mosdns 后，依赖它的 DNS 解析可能会受影响。确定停止吗？')) return;
+      control('stop');
+    }
+
+    function confirmUpgradeCore() {
+      if (!confirm('升级会替换 /usr/local/bin/mosdns。面板会先备份旧内核，新内核启动失败会自动回滚。确定继续吗？')) return;
+      control('upgrade_core');
+    }
+
+    async function loadAccountSettings() {
+      const res = await api('/api/account-settings');
+      $('accountUsername').value = res.username || '';
+      $('accountPassword').value = '';
+      $('accountPasswordConfirm').value = '';
+    }
+
+    async function saveAccountSettings() {
+      if (busy) return;
+      if ($('accountPassword').value || $('accountPasswordConfirm').value) {
+        if (!confirm('确定修改 Web 面板登录密码吗？保存后下次登录需要使用新密码。')) return;
+      }
+      setBusy(true, '正在保存登录信息...');
+      try {
+        const res = await api('/api/account-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username: $('accountUsername').value,
+            password: $('accountPassword').value,
+            confirm: $('accountPasswordConfirm').value
+          })
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        if (res.success) await loadAccountSettings();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadSettings() {
+      const res = await api('/api/settings');
+      $('local_dns').value = res.local_dns || '';
+      $('remote_dns').value = res.remote_dns || '';
+      $('ttl').value = res.ttl || '';
+    }
+
+    function setTtl(value) {
+      $('ttl').value = String(value);
+    }
+
+    async function saveSettings() {
+      if (busy) return;
+      setBusy(true, '正在保存 DNS 参数...');
+      try {
+        const res = await api('/api/settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            local_dns: $('local_dns').value,
+            remote_dns: $('remote_dns').value,
+            ttl: $('ttl').value
+          })
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        await loadStatus();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadRule() {
+      const rule = $('ruleSelect').value;
+      const res = await api('/api/rules/' + encodeURIComponent(rule));
+      $('ruleContent').value = res.content || '';
+      $('ruleTitle').textContent = res.label || '规则文件';
+      $('ruleSummary').textContent = res.summary || '';
+      $('ruleFormat').textContent = res.format || '';
+      currentRuleExample = (res.examples || []).join('\n');
+      $('ruleExample').textContent = currentRuleExample || '暂无示例';
+    }
+
+    function appendRuleExample() {
+      if (!currentRuleExample) return;
+      const editor = $('ruleContent');
+      const prefix = editor.value.trim() ? '\n\n' : '';
+      editor.value = editor.value + prefix + currentRuleExample + '\n';
+      editor.focus();
+    }
+
+    async function saveRule() {
+      if (busy) return;
+      setBusy(true, '正在保存规则...');
+      try {
+        const rule = $('ruleSelect').value;
+        const res = await api('/api/rules/' + encodeURIComponent(rule), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({content: $('ruleContent').value})
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        const output = $('commandOutput');
+        if (output) output.textContent = res.message || '';
+        await loadStatus();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadSyncSettings() {
+      const res = await api('/api/rule-sync-settings');
+      $('syncEnabled').checked = Boolean(res.enabled);
+      $('syncToken').value = res.token || '';
+      $('syncPeers').value = res.peers_text || '';
+      renderSyncTestResults([]);
+    }
+
+    function generateSyncToken() {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      $('syncToken').value = Array.from(bytes, value => chars[value % chars.length]).join('');
+      toast('已生成随机密钥', '保存同步设置后生效。');
+    }
+
+    async function copySyncToken() {
+      const token = $('syncToken').value.trim();
+      if (!token) {
+        toast('没有可复制的密钥', '请先生成或填写同步密钥。');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(token);
+      } catch (err) {
+        $('syncToken').select();
+        document.execCommand('copy');
+      }
+      toast('已复制同步密钥', '可以粘贴到其他 mosdns 面板。');
+    }
+
+    function renderSyncTestResults(results) {
+      const list = $('syncTestResults');
+      if (!list) return;
+      list.textContent = '';
+      (results || []).forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'sync-test-item';
+        const info = document.createElement('div');
+        const peer = document.createElement('div');
+        peer.className = 'sync-test-peer';
+        peer.textContent = item.peer || '--';
+        const message = document.createElement('div');
+        message.className = 'sync-test-message';
+        message.textContent = item.message || '';
+        info.appendChild(peer);
+        info.appendChild(message);
+        const status = document.createElement('div');
+        status.className = 'sync-test-status ' + (item.success ? 'ok' : 'bad');
+        status.textContent = item.success ? '正常' : '异常';
+        row.appendChild(info);
+        row.appendChild(status);
+        list.appendChild(row);
+      });
+    }
+
+    async function saveSyncSettings() {
+      if (busy) return;
+      setBusy(true, '正在保存同步设置...');
+      try {
+        const res = await api('/api/rule-sync-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            enabled: String($('syncEnabled').checked),
+            token: $('syncToken').value,
+            peers_text: $('syncPeers').value
+          })
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function testSyncPeers() {
+      if (busy) return;
+      setBusy(true, '正在测试其他面板连通性...');
+      try {
+        const res = await api('/api/rule-sync-test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            token: $('syncToken').value,
+            peers_text: $('syncPeers').value
+          })
+        });
+        renderSyncTestResults(res.results || []);
+        toast(res.success ? '连通性正常' : '连通性异常', res.message || '');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function updateGeoScheduleFields() {
+      const mode = $('geoScheduleMode').value;
+      $('geoScheduleTime').disabled = mode === 'disabled';
+      $('geoScheduleWeekdayField').style.display = mode === 'weekly' ? '' : 'none';
+    }
+
+    async function loadGeoSchedule() {
+      const res = await api('/api/geo-schedule');
+      $('geoScheduleMode').value = res.mode && res.mode !== 'custom' ? res.mode : 'daily';
+      $('geoScheduleTime').value = res.time || '02:00';
+      $('geoScheduleWeekday').value = res.weekday || '1';
+      $('geoScheduleSummary').textContent = res.summary || '未设置自动更新';
+      updateGeoScheduleFields();
+    }
+
+    async function saveGeoSchedule() {
+      if (busy) return;
+      setBusy(true, '正在保存 Geo 自动更新...');
+      try {
+        const res = await api('/api/geo-schedule', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            mode: $('geoScheduleMode').value,
+            time: $('geoScheduleTime').value,
+            weekday: $('geoScheduleWeekday').value
+          })
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        await loadGeoSchedule();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadConfig() {
+      const res = await api('/api/config');
+      $('configContent').value = res.content || '';
+    }
+
+    async function saveConfig() {
+      if (!confirm('确定保存完整配置并重启 mosdns 吗？')) return;
+      if (busy) return;
+      setBusy(true, '正在保存完整配置...');
+      try {
+        const res = await api('/api/config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({content: $('configContent').value})
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        await loadStatus();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadBackups() {
+      const res = await api('/api/backups');
+      const backups = res.backups || [];
+      $('backupCount').textContent = backups.length + ' 个备份';
+      const list = $('backupList');
+      list.textContent = '';
+      if (!backups.length) {
+        const empty = document.createElement('div');
+        empty.className = 'hint';
+        empty.textContent = '还没有可恢复的配置备份。';
+        list.appendChild(empty);
+        return;
+      }
+      backups.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'backup-item';
+        const info = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'backup-name';
+        name.textContent = item.id;
+        const meta = document.createElement('div');
+        meta.className = 'backup-meta';
+        meta.textContent = item.mtime_text + ' · ' + Math.max(1, Math.round(item.size / 1024)) + ' KB';
+        info.appendChild(name);
+        info.appendChild(meta);
+        const btn = document.createElement('button');
+        btn.className = 'soft-danger';
+        btn.textContent = '恢复';
+        btn.onclick = () => restoreBackup(item.id);
+        row.appendChild(info);
+        row.appendChild(btn);
+        list.appendChild(row);
+      });
+    }
+
+    async function loadBackupSettings() {
+      const res = await api('/api/backup-settings');
+      $('backupKeepCount').value = res.keep_count || 20;
+      if (typeof res.count === 'number') $('backupCount').textContent = res.count + ' 个备份';
+    }
+
+    async function saveBackupSettings() {
+      if (busy) return;
+      setBusy(true, '正在保存备份保留策略...');
+      try {
+        const res = await api('/api/backup-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({keep_count: $('backupKeepCount').value})
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        await loadBackupSettings();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function cleanupBackups() {
+      if (!confirm('确定清理超过保留数量的旧备份吗？')) return;
+      if (busy) return;
+      setBusy(true, '正在清理旧备份...');
+      try {
+        const res = await api('/api/backups/cleanup', {method: 'POST'});
+        toast(res.success ? '清理完成' : '清理失败', res.message || '');
+        await loadBackups();
+        await loadBackupSettings();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function restoreBackup(id) {
+      if (!confirm('确定恢复这个配置备份并重启 mosdns 吗？')) return;
+      if (busy) return;
+      setBusy(true, '正在恢复备份...');
+      try {
+        const res = await api('/api/backups', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id})
+        });
+        toast(res.success ? '恢复完成' : '恢复失败', res.message || '');
+        const output = $('commandOutput');
+        if (output) output.textContent = res.message || '';
+        await loadStatus();
+        await loadBackups();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadDashboardLogs() {
+      const target = $('dashboardLogs');
+      if (!target) return;
+      const res = await api('/api/logs?lines=80');
+      target.textContent = res.logs || '';
+    }
+
+    async function loadAll() {
+      await loadStatus();
+      if (activeView === 'dashboard') await loadDashboardLogs();
+      if (activeView === 'advanced') {
+        await loadAccountSettings();
+        await loadConfig();
+      }
+      if (activeView === 'rules') await loadRule();
+      if (activeView === 'settings') await loadSettings();
+      if (activeView === 'maintenance') {
+        await loadBackups();
+        await loadBackupSettings();
+        await loadSyncSettings();
+        await loadGeoSchedule();
+      }
+    }
+
+    const initialView = location.hash.replace('#', '');
+    if (viewMeta[initialView]) showView(initialView);
+    loadAll();
+    setInterval(loadStatus, 8000);
+    setInterval(() => {
+      if (activeView === 'dashboard' && !busy) loadDashboardLogs();
+    }, 5000);
+  </script>
+</body>
+</html>

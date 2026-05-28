@@ -1,0 +1,6 @@
+[Unit]
+Description=MosDNS Rescue Mode
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mosctl rescue enable

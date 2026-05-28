@@ -1,0 +1,14 @@
+[Unit]
+Description=MosDNS Web Manager
+After=network.target mosdns.service
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/mosdns/manager
+EnvironmentFile=-/etc/mosdns/.env
+ExecStart=/usr/bin/python3 /etc/mosdns/manager/app.py
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

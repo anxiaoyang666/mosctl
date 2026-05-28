@@ -1,0 +1,56 @@
+## hostname
+mosctl
+## os
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.1
+ID=debian
+HOME_URL="https://www.debian.org/"
+## processes
+    PID    PPID COMMAND         COMMAND
+  10032       1 mosdns          /usr/local/bin/mosdns start -d /etc/mosdns
+## binaries
+--- mosctl /usr/local/bin/mosctl
+-rwxr-xr-x 1 root root 15665 Feb  6 03:31 /usr/local/bin/mosctl
+/usr/local/bin/mosctl: Bourne-Again shell script, Unicode text, UTF-8 text executable
+2459fd97ee9c6904ec4d17153302c8480b7616d5083276dbe48ade3c808c9906  /usr/local/bin/mosctl
+
+Usage: mosctl [rescue|sync|update|flush|cache-ttl|test|version]
+--- mosdns /usr/local/bin/mosdns
+-rwxr-xr-x 1 root root 19189944 Jan 11 11:39 /usr/local/bin/mosdns
+/usr/local/bin/mosdns: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, BuildID[sha1]=16b2d988acfca9321d90ed4c45a0218959319bb9, stripped
+5357fbb83c89f0a7acad275b72c33aa70d4c720cb5590525660132b10cee8af9  /usr/local/bin/mosdns
+v5.3.4-0-gb732318
+Error: unknown shorthand flag: 'v' in -v
+Usage:
+  mosdns [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  config      Tools that can generate/convert mosdns config file.
+  help        Help about any command
+  probe       Run some server tests.
+  service     Manage mosdns as a system service.
+  start       Start mosdns main program.
+  version     Print out version info and exit.
+
+Flags:
+  -h, --help   help for mosdns
+
+Use "mosdns [command] --help" for more information about a command.
+
+2026-05-26T11:23:54.956Z	FATAL	unknown shorthand flag: 'v' in -v
+## services
+mosdns-rescue.service                        loaded    inactive dead    MosDNS Rescue Mode
+mosdns.service                               loaded    active   running MosDNS Service
+## copied paths
+16K	/usr/local/bin/mosctl
+4.0K	/etc/systemd/system/mosdns.service
+4.0K	/etc/systemd/system/mosdns-rescue.service
+8.0K	/etc/mosdns/config.yaml
+8.0K	/etc/mosdns/config.yaml.bak
+2.0M	/etc/mosdns/rules
+4.0K	/etc/sysctl.d/99-mosdns.conf

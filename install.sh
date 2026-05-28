@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_NAME="Mosctl"
 GH_PROXY="${GH_PROXY:-https://gh-proxy.com/}"
-REPO_URL="${MOSCTL_REPO_URL:-}"
+REPO_URL="${MOSCTL_REPO_URL:-https://github.com/anxiaoyang666/mosctl.git}"
 BRANCH="${MOSCTL_BRANCH:-main}"
 MOSDNS_VERSION="${MOSDNS_VERSION:-latest}"
 WEB_PORT="${WEB_PORT:-7840}"
@@ -75,10 +75,6 @@ source_root() {
   if [ -d "$script_dir/remote-root" ]; then
     printf '%s' "$script_dir"
     return
-  fi
-
-  if [ -z "$REPO_URL" ]; then
-    die "通过 curl 安装时必须设置 MOSCTL_REPO_URL，例如：MOSCTL_REPO_URL=https://github.com/你的用户名/mosctl.git bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/你的用户名/mosctl/main/install.sh)\""
   fi
 
   TMP_DIR="$(mktemp -d)"

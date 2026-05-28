@@ -65,7 +65,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 6))
+        self.assertGreaterEqual(version, (0, 3, 7))
 
     def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
         text = app_source()
@@ -112,8 +112,11 @@ class PanelUpgradeContractTest(unittest.TestCase):
     def test_sidebar_version_brand_is_subtle_and_update_state_is_amber(self):
         text = index_source()
 
-        self.assertIn("font-weight: 780;", text)
-        self.assertIn("font-weight: 600;", text)
+        self.assertIn("font-weight: 650;", text)
+        self.assertIn("font-weight: 500;", text)
+        self.assertIn("font-weight: 680;", text)
+        self.assertNotIn("font-weight: 780;", text)
+        self.assertNotIn("font-weight: 760;", text)
         self.assertNotIn("font-weight: 900;", text)
         self.assertIn("background: #fffbeb;", text)
         self.assertIn("color: #b45309;", text)

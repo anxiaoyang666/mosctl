@@ -65,7 +65,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 5))
+        self.assertGreaterEqual(version, (0, 3, 6))
 
     def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
         text = app_source()
@@ -109,6 +109,18 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("background: #f2f4f7;", text)
         self.assertIn('class="brand-copy"', text)
 
+    def test_sidebar_version_brand_is_subtle_and_update_state_is_amber(self):
+        text = index_source()
+
+        self.assertIn("font-weight: 780;", text)
+        self.assertIn("font-weight: 600;", text)
+        self.assertNotIn("font-weight: 900;", text)
+        self.assertIn("background: #fffbeb;", text)
+        self.assertIn("color: #b45309;", text)
+        self.assertIn("version-dot", text)
+        self.assertIn("@keyframes versionPulse", text)
+        self.assertIn("animation: versionPulse 1.6s ease-in-out infinite;", text)
+
     def test_sidebar_version_badge_opens_version_popover(self):
         text = index_source()
 
@@ -121,6 +133,9 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("function refreshPanelVersionPopover", text)
         self.assertIn("function openPanelRelease", text)
         self.assertIn("versionPopover.classList.toggle('show'", text)
+        self.assertIn("document.addEventListener('click'", text)
+        self.assertIn("versionPopover.contains(event.target)", text)
+        self.assertIn("versionText.contains(event.target)", text)
 
 
 if __name__ == "__main__":

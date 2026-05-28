@@ -101,6 +101,26 @@
       white-space: nowrap;
       max-width: 164px;
     }
+    .brand-version {
+      display: block;
+      border: 0;
+      background: transparent;
+      padding: 0;
+      font: inherit;
+      text-align: left;
+      cursor: default;
+    }
+    .brand-version.has-update {
+      color: var(--amber);
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .brand-version:focus-visible {
+      outline: 2px solid rgba(37, 99, 235, .42);
+      outline-offset: 3px;
+      border-radius: 6px;
+    }
     .nav {
       display: grid;
       gap: 6px;
@@ -583,7 +603,7 @@
         <img class="brand-mark" src="{{ url_for('static', filename='mosctl-logo.svg') }}" alt="Mosctl">
         <div>
           <h1>Mosctl</h1>
-          <div class="brand-sub" id="versionText">正在读取状态</div>
+          <button type="button" class="brand-sub brand-version" id="versionText" onclick="handlePanelVersionClick()">正在读取状态</button>
         </div>
       </div>
       <nav class="nav" aria-label="页面切换">
@@ -1056,6 +1076,8 @@
     let activeView = 'dashboard';
     let busy = false;
     let currentRuleExample = '';
+    let panelUpdateAvailable = false;
+    let panelLatestVersion = '';
 
     function $(id) {
       return document.getElementById(id);
@@ -1123,7 +1145,9 @@
       $('serviceState').className = 'stat-value ' + (res.running ? 'ok' : 'bad');
       $('rescueState').textContent = res.rescue ? '已开启' : '未开启';
       $('rescueState').className = 'stat-value ' + (res.rescue ? 'warn' : 'ok');
-      $('versionText').textContent = res.version_clean || res.version || '未知版本';
+      $('versionText').textContent = panelUpdateAvailable
+        ? 'Mosctl v' + (res.panel_version || '--') + ' 可更新'
+        : (res.panel_version_text || ('Mosctl v' + (res.panel_version || '--')));
       $('cacheState').textContent = formatTtl(res.ttl);
       $('versionState').textContent = res.version_clean || res.version || '--';
       $('coreCurrent').textContent = res.version_clean || res.version || '--';
@@ -1154,6 +1178,9 @@
         const output = $('commandOutput');
         if (output) output.textContent = res.message || '';
         toast(res.success ? '操作完成' : '操作失败', res.message || '');
+        if (action === 'upgrade_panel' && res.success && Number(res.reload_after || 0) > 0) {
+          setTimeout(() => location.reload(), 5000);
+        }
         await loadStatus();
         if (activeView === 'dashboard') await loadDashboardLogs();
       } finally {
@@ -1200,14 +1227,33 @@
       const res = await api('/api/panel-upgrade-source');
       $('panelRepo').textContent = res.repo_url || '--';
       $('panelBranch').textContent = res.branch || '--';
-      $('panelUpgradeHint').textContent = res.supported
-        ? '升级时会从当前仓库分支下载最新代码，并保留本机配置与规则。'
-        : '当前升级源不是支持的 GitHub 仓库地址，请先检查 .env 里的 MOSCTL_REPO_URL。';
+      panelUpdateAvailable = Boolean(res.update_available);
+      panelLatestVersion = res.latest_version || '';
+      $('versionText').classList.toggle('has-update', panelUpdateAvailable);
+      $('versionText').title = panelUpdateAvailable
+        ? '发现 Mosctl v' + panelLatestVersion + '，点击升级'
+        : 'Mosctl 面板已是最新或暂未检测到更新';
+      if (panelUpdateAvailable) {
+        $('versionText').textContent = 'Mosctl v' + (res.current_version || '--') + ' 可更新';
+      }
+      $('panelUpgradeHint').textContent = res.update_available
+        ? '发现新面板版本 v' + res.latest_version + '，当前版本 v' + res.current_version + '。'
+        : (res.check_success
+          ? '当前面板版本 v' + (res.current_version || '--') + '，远端版本 v' + (res.latest_version || '--') + '，无需更新。'
+          : (res.message || '当前升级源不是支持的 GitHub 仓库地址，请先检查 .env 里的 MOSCTL_REPO_URL。'));
     }
 
     function confirmUpgradePanel() {
       if (!confirm('升级会替换 Mosctl Web 面板文件和 /usr/local/bin/mosctl，但不会覆盖 .env、config.yaml 和 rules。升级完成后 Web 服务会自动重启，确定继续吗？')) return;
       control('upgrade_panel');
+    }
+
+    function handlePanelVersionClick() {
+      if (!panelUpdateAvailable) {
+        loadPanelUpgradeSource();
+        return;
+      }
+      confirmUpgradePanel();
     }
 
     async function loadAccountSettings() {
@@ -1560,6 +1606,7 @@
 
     async function loadAll() {
       await loadStatus();
+      await loadPanelUpgradeSource();
       if (activeView === 'dashboard') await loadDashboardLogs();
       if (activeView === 'advanced') {
         await loadAccountSettings();

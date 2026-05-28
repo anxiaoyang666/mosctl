@@ -39,6 +39,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
+PANEL_VERSION = "0.3.0"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -409,14 +410,96 @@ def mosctl_repo_settings():
     }
 
 
-def github_archive_url(repo_url, branch):
+def github_repo_parts(repo_url):
     repo = str(repo_url or "").strip()
     repo = repo[:-4] if repo.endswith(".git") else repo
     match = re.match(r"^https://github\.com/([^/\s]+)/([^/\s]+)$", repo)
     if not match:
+        return None
+    return match.groups()
+
+
+def github_archive_url(repo_url, branch):
+    parts = github_repo_parts(repo_url)
+    if not parts:
         return ""
-    owner, name = match.groups()
+    owner, name = parts
     return f"https://github.com/{owner}/{name}/archive/refs/heads/{quote(branch, safe='/')}.zip"
+
+
+def github_raw_app_url(repo_url, branch):
+    parts = github_repo_parts(repo_url)
+    if not parts:
+        return ""
+    owner, name = parts
+    return f"https://raw.githubusercontent.com/{owner}/{name}/{quote(branch, safe='/')}/remote-root/etc/mosdns/manager/app.py"
+
+
+def read_url_text(urls, timeout=15):
+    last_error = ""
+    for url in urls:
+        try:
+            req = urlrequest.Request(url, headers={"User-Agent": "mosdns-web-manager"})
+            with urlrequest.urlopen(req, timeout=timeout) as resp:
+                return True, resp.read().decode("utf-8", "replace"), url
+        except Exception as exc:
+            last_error = str(exc)
+    return False, last_error, ""
+
+
+def panel_version_tuple(value):
+    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", str(value or ""))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def parse_panel_version(text):
+    match = re.search(r'(?m)^PANEL_VERSION\s*=\s*["\']([^"\']+)["\']\s*$', text or "")
+    return match.group(1).strip() if match else ""
+
+
+def remote_panel_version(settings=None):
+    settings = settings or mosctl_repo_settings()
+    raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
+    if not raw_url:
+        return {
+            "success": False,
+            "latest_version": "",
+            "source": "",
+            "message": "仅支持 GitHub 仓库在线检测，请检查 MOSCTL_REPO_URL",
+        }
+    ok, text, source = read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"], timeout=15)
+    if not ok:
+        return {"success": False, "latest_version": "", "source": "", "message": "检测远端面板版本失败：\n" + text}
+    version = parse_panel_version(text)
+    if not version:
+        return {
+            "success": False,
+            "latest_version": "",
+            "source": source,
+            "message": "远端面板没有版本号，可能是旧版本，已禁止在线升级以避免降级。",
+        }
+    return {"success": True, "latest_version": version, "source": source, "message": ""}
+
+
+def panel_upgrade_state():
+    settings = mosctl_repo_settings()
+    remote = remote_panel_version(settings)
+    current_tuple = panel_version_tuple(PANEL_VERSION)
+    latest_tuple = panel_version_tuple(remote.get("latest_version"))
+    update_available = bool(remote.get("success") and current_tuple and latest_tuple and latest_tuple > current_tuple)
+    return {
+        **settings,
+        "archive_url": github_archive_url(settings["repo_url"], settings["branch"]),
+        "supported": bool(github_archive_url(settings["repo_url"], settings["branch"])),
+        "current_version": PANEL_VERSION,
+        "latest_version": remote.get("latest_version", ""),
+        "update_available": update_available,
+        "check_success": remote.get("success", False),
+        "source": remote.get("source", ""),
+        "message": remote.get("message", ""),
+    }
 
 
 def download_mosctl_source(tmpdir):
@@ -446,6 +529,9 @@ def download_mosctl_source(tmpdir):
             ok, message = run_cmd(["python3", "-m", "py_compile", app_path], timeout=20)
             if not ok:
                 return False, "新面板 app.py 校验失败，已取消升级：\n" + message, None, settings
+            with open(app_path, "r", encoding="utf-8") as file:
+                remote_version = parse_panel_version(file.read())
+            settings["remote_version"] = remote_version
             return True, source, source_root, settings
     return False, "安装包中没有找到有效的 remote-root，已取消升级", None, settings
 
@@ -542,7 +628,21 @@ def upgrade_mosctl_panel():
     with tempfile.TemporaryDirectory() as tmpdir:
         ok, source, source_root, settings = download_mosctl_source(tmpdir)
         if not ok:
-            return False, source
+            return False, source, False
+
+        remote_version = settings.get("remote_version", "")
+        current_tuple = panel_version_tuple(PANEL_VERSION)
+        remote_tuple = panel_version_tuple(remote_version)
+        if not remote_tuple:
+            return False, "远端面板没有版本号，可能是旧版本，已取消升级以避免降级。", False
+        if current_tuple and remote_tuple <= current_tuple:
+            return (
+                True,
+                "当前已是最新版本，无需更新。\n"
+                f"当前版本：v{PANEL_VERSION}\n"
+                f"远端版本：v{remote_version}",
+                False,
+            )
 
         backup_root = backup_panel_targets()
         try:
@@ -551,7 +651,7 @@ def upgrade_mosctl_panel():
         except Exception as exc:
             restore_panel_backup(backup_root)
             run_cmd(["systemctl", "daemon-reload"], timeout=20)
-            return False, "Mosctl 面板升级失败，已回滚旧文件：\n" + str(exc)
+            return False, "Mosctl 面板升级失败，已回滚旧文件：\n" + str(exc), False
 
     schedule_web_restart()
     return (
@@ -560,8 +660,12 @@ def upgrade_mosctl_panel():
         f"来源：{source}\n"
         f"仓库：{settings['repo_url']}\n"
         f"分支：{settings['branch']}\n"
+        f"旧版本：v{PANEL_VERSION}\n"
+        f"新版本：v{remote_version}\n"
         f"旧面板备份：{backup_root}\n"
         "请稍等几秒后刷新页面。"
+        ,
+        True,
     )
 
 
@@ -1308,6 +1412,8 @@ def api_status():
             "rescue": rescue_enabled(),
             "version": get_version(),
             "version_clean": clean_version(get_version()),
+            "panel_version": PANEL_VERSION,
+            "panel_version_text": f"Mosctl v{PANEL_VERSION}",
             "web_port": env.get("WEB_PORT", "7840"),
             **values,
         }
@@ -1323,10 +1429,7 @@ def api_core_version():
 @app.route("/api/panel-upgrade-source")
 @login_required
 def api_panel_upgrade_source():
-    settings = mosctl_repo_settings()
-    settings["archive_url"] = github_archive_url(settings["repo_url"], settings["branch"])
-    settings["supported"] = bool(settings["archive_url"])
-    return jsonify(settings)
+    return jsonify(panel_upgrade_state())
 
 
 @app.route("/api/control", methods=["POST"])
@@ -1350,8 +1453,8 @@ def api_control():
         ok, message = upgrade_mosdns_core()
         return jsonify({"success": ok, "message": message})
     if action == "upgrade_panel":
-        ok, message = upgrade_mosctl_panel()
-        return jsonify({"success": ok, "message": message})
+        ok, message, should_reload = upgrade_mosctl_panel()
+        return jsonify({"success": ok, "message": message, "reload_after": 5 if should_reload else 0})
     if action not in commands:
         return jsonify({"success": False, "message": "未知操作"})
     ok, message = run_cmd(commands[action][0], timeout=commands[action][1])

@@ -32,8 +32,12 @@ class PanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_endpoint_exists(self):
         text = app_source()
 
+        self.assertIn("PANEL_VERSION", text)
+        self.assertIn("def panel_version_tuple", text)
+        self.assertIn("def parse_panel_version", text)
         self.assertIn("def upgrade_mosctl_panel", text)
         self.assertIn('action == "upgrade_panel"', text)
+        self.assertIn("当前已是最新版本", text)
 
     def test_panel_upgrade_schedules_web_restart_after_response(self):
         text = app_source()
@@ -47,9 +51,11 @@ class PanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_ui_exists(self):
         text = index_source()
 
-        self.assertIn("Mosctl 面板升级", text)
+        self.assertIn("panelRepo", text)
         self.assertIn("loadPanelUpgradeSource", text)
         self.assertIn("confirmUpgradePanel", text)
+        self.assertIn("handlePanelVersionClick", text)
+        self.assertIn("setTimeout(() => location.reload(), 5000)", text)
         self.assertIn("upgrade_panel", text)
 
 

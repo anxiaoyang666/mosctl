@@ -30,21 +30,33 @@ plugins:
       upstreams:
         - addr: "8.8.8.8:53" # TAG_REMOTE
 
-  # 强制国内 + 国内域名规则
+  # 强制国内规则，优先级高于 geosite
+  - tag: force_cn
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/force-cn.txt"
+
+  # 强制国外规则，优先级高于 geosite
+  - tag: force_no_cn
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/force-nocn.txt"
+
+  # 国内域名规则
   - tag: geosite_cn
     type: domain_set
     args:
       files:
         - "/etc/mosdns/rules/geosite_cn.txt"
-        - "/etc/mosdns/rules/force-cn.txt"
 
-  # 强制国外 + 国外域名规则
+  # 国外域名规则
   - tag: geosite_no_cn
     type: domain_set
     args:
       files:
         - "/etc/mosdns/rules/geosite_no_cn.txt"
-        - "/etc/mosdns/rules/force-nocn.txt"
 
   # 本地 hosts，规则定义排序放在最后，执行时仍优先用于本地覆盖
   - tag: hosts
@@ -81,6 +93,18 @@ plugins:
       - exec: prefer_ipv4
       - exec: $forward_remote
 
+  - tag: query_is_force_cn_domain
+    type: sequence
+    args:
+      - matches: qname $force_cn
+        exec: $forward_local
+
+  - tag: query_is_force_no_cn_domain
+    type: sequence
+    args:
+      - matches: qname $force_no_cn
+        exec: $forward_remote_upstream
+
   - tag: query_is_local_domain
     type: sequence
     args:
@@ -97,6 +121,12 @@ plugins:
     type: sequence
     args:
       - exec: $hosts
+      - exec: jump has_resp_sequence
+
+      - exec: $query_is_force_cn_domain
+      - exec: jump has_resp_sequence
+
+      - exec: $query_is_force_no_cn_domain
       - exec: jump has_resp_sequence
 
       - exec: $query_is_local_domain

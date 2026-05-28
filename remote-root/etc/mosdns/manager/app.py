@@ -39,7 +39,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.1"
+PANEL_VERSION = "0.3.2"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -470,7 +470,7 @@ def remote_panel_version(settings=None):
             "source": "",
             "message": "仅支持 GitHub 仓库在线检测，请检查 MOSCTL_REPO_URL",
         }
-    ok, text, source = read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"], timeout=15)
+    ok, text, source = read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
     if ok:
         version = parse_panel_version(text)
         if version:
@@ -524,7 +524,7 @@ def download_mosctl_source(tmpdir):
         return False, "仅支持 GitHub 仓库在线升级，请检查 MOSCTL_REPO_URL", None, settings
 
     zip_path = os.path.join(tmpdir, "mosctl-panel.zip")
-    ok, source = download_file([archive_url, f"https://gh-proxy.com/{archive_url}"], zip_path)
+    ok, source = download_file([f"https://gh-proxy.com/{archive_url}", archive_url], zip_path)
     if not ok:
         return False, "下载 Mosctl 面板失败：\n" + source, None, settings
 
@@ -1343,8 +1343,8 @@ def get_version():
 
 def latest_mosdns_release():
     urls = [
-        MOSDNS_RELEASE_API,
         f"https://gh-proxy.com/{MOSDNS_RELEASE_API}",
+        MOSDNS_RELEASE_API,
     ]
     last_error = ""
     for url in urls:

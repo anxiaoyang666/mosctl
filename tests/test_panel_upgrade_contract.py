@@ -65,7 +65,21 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 1))
+        self.assertGreaterEqual(version, (0, 3, 2))
+
+    def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
+        text = app_source()
+
+        self.assertIn('read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url]', text)
+        self.assertIn('download_file([f"https://gh-proxy.com/{archive_url}", archive_url]', text)
+        self.assertNotIn('read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"]', text)
+        self.assertNotIn('download_file([archive_url, f"https://gh-proxy.com/{archive_url}"]', text)
+
+    def test_core_version_check_uses_proxy_source_before_github_api(self):
+        text = app_source()
+
+        self.assertIn('f"https://gh-proxy.com/{MOSDNS_RELEASE_API}",\n        MOSDNS_RELEASE_API,', text)
+        self.assertNotIn('MOSDNS_RELEASE_API,\n        f"https://gh-proxy.com/{MOSDNS_RELEASE_API}",', text)
 
     def test_sidebar_version_label_does_not_repeat_product_name(self):
         text = index_source()

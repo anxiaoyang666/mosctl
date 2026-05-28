@@ -65,7 +65,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 2))
+        self.assertGreaterEqual(version, (0, 3, 3))
 
     def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
         text = app_source()
@@ -88,6 +88,31 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertNotIn("'Mosctl v' + (res.current_version", text)
         self.assertIn("'v' + (res.panel_version || '--')", text)
         self.assertIn("'v' + (res.current_version || '--') + ' 可更新'", text)
+
+
+    def test_sidebar_brand_uses_reference_style_version_badge(self):
+        text = index_source()
+
+        self.assertIn(".brand-copy", text)
+        self.assertIn("width: 64px;", text)
+        self.assertIn("height: 64px;", text)
+        self.assertIn("border-radius: 16px;", text)
+        self.assertIn("border-radius: 999px;", text)
+        self.assertIn("background: #f2f4f7;", text)
+        self.assertIn('class="brand-copy"', text)
+
+    def test_sidebar_version_badge_opens_version_popover(self):
+        text = index_source()
+
+        self.assertIn('id="versionPopover"', text)
+        self.assertIn('id="versionPopoverCurrent"', text)
+        self.assertIn('id="versionPopoverState"', text)
+        self.assertIn('class="version-popover"', text)
+        self.assertIn("function renderVersionPopover", text)
+        self.assertIn("function toggleVersionPopover", text)
+        self.assertIn("function refreshPanelVersionPopover", text)
+        self.assertIn("function openPanelRelease", text)
+        self.assertIn("versionPopover.classList.toggle('show'", text)
 
 
 if __name__ == "__main__":

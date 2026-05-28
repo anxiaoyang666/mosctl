@@ -68,58 +68,154 @@
       height: 100vh;
       border-right: 1px solid var(--line);
       background: var(--surface);
-      padding: 18px 14px;
+      padding: 22px 16px;
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      gap: 26px;
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 10px;
-      min-height: 42px;
-      padding: 0 6px;
+      gap: 16px;
+      min-height: 72px;
+      padding: 8px 10px 10px;
     }
     .brand-mark {
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
+      width: 64px;
+      height: 64px;
+      border-radius: 16px;
       display: block;
-      box-shadow: 0 8px 18px rgba(37, 99, 235, .22);
+      flex: 0 0 auto;
+      box-shadow: 0 18px 34px rgba(37, 99, 235, .22);
+    }
+    .brand-copy {
+      min-width: 0;
+      display: grid;
+      justify-items: start;
+      gap: 8px;
     }
     .brand h1 {
       margin: 0;
-      font-size: 17px;
+      font-size: 31px;
+      line-height: 1;
+      font-weight: 900;
       letter-spacing: 0;
     }
     .brand-sub {
-      margin-top: 2px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 18px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      max-width: 164px;
+      max-width: 138px;
     }
     .brand-version {
-      display: block;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
       border: 0;
-      background: transparent;
-      padding: 0;
+      border-radius: 999px;
+      background: #f2f4f7;
+      padding: 0 12px;
       font: inherit;
+      line-height: 1;
       text-align: left;
       cursor: default;
     }
     .brand-version.has-update {
-      color: var(--amber);
+      color: var(--primary);
+      background: var(--primary-soft);
       cursor: pointer;
-      text-decoration: underline;
-      text-underline-offset: 3px;
     }
     .brand-version:focus-visible {
       outline: 2px solid rgba(37, 99, 235, .42);
       outline-offset: 3px;
-      border-radius: 6px;
+      border-radius: 999px;
+    }
+    .version-popover {
+      position: fixed;
+      left: 104px;
+      top: 116px;
+      z-index: 30;
+      width: 448px;
+      max-width: calc(100vw - 32px);
+      display: none;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fff;
+      box-shadow: 0 24px 58px rgba(16, 24, 40, .16);
+    }
+    .version-popover.show { display: block; }
+    .version-popover-head {
+      min-height: 88px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 28px;
+      border-bottom: 1px solid #eef2f7;
+    }
+    .version-popover-title {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 850;
+      letter-spacing: 0;
+    }
+    .version-popover-refresh {
+      width: 44px;
+      min-width: 44px;
+      padding: 0;
+      border: 0;
+      color: #98a2b3;
+      background: transparent;
+      font-size: 28px;
+    }
+    .version-popover-body {
+      display: grid;
+      justify-items: center;
+      gap: 12px;
+      padding: 32px 28px 28px;
+    }
+    .version-popover-current {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #101828;
+      font-size: 42px;
+      line-height: 1;
+      font-weight: 900;
+    }
+    .version-popover-check {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      color: #16a34a;
+      background: #dcfce7;
+      font-size: 22px;
+      font-weight: 900;
+    }
+    .version-popover-state {
+      color: var(--muted);
+      font-size: 18px;
+    }
+    .version-popover-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .version-popover-actions button {
+      min-height: 40px;
+      border: 0;
+      color: #667085;
+      background: transparent;
+      font-size: 16px;
     }
     .nav {
       display: grid;
@@ -127,15 +223,16 @@
     }
     .tab {
       width: 100%;
-      min-height: 44px;
+      min-height: 54px;
       border: 1px solid transparent;
-      border-radius: 8px;
+      border-radius: 12px;
       background: transparent;
       color: var(--text);
       padding: 0 12px;
-      text-align: left;
+      text-align: center;
       font: inherit;
-      font-weight: 700;
+      font-size: 16px;
+      font-weight: 850;
       cursor: pointer;
       touch-action: manipulation;
       transition: background-color .16s ease, border-color .16s ease, color .16s ease;
@@ -573,6 +670,10 @@
       .sidebar-foot {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
+      .version-popover {
+        left: 16px;
+        top: 116px;
+      }
       .input-actions {
         grid-template-columns: 1fr;
       }
@@ -601,9 +702,26 @@
     <aside class="sidebar">
       <div class="brand">
         <img class="brand-mark" src="{{ url_for('static', filename='mosctl-logo.svg') }}" alt="Mosctl">
-        <div>
+        <div class="brand-copy">
           <h1>Mosctl</h1>
           <button type="button" class="brand-sub brand-version" id="versionText" onclick="handlePanelVersionClick()">正在读取状态</button>
+        </div>
+      </div>
+      <div class="version-popover" id="versionPopover" role="dialog" aria-label="Mosctl 面板版本">
+        <div class="version-popover-head">
+          <h3 class="version-popover-title">当前版本</h3>
+          <button type="button" class="version-popover-refresh" aria-label="刷新版本" onclick="refreshPanelVersionPopover()">↻</button>
+        </div>
+        <div class="version-popover-body">
+          <div class="version-popover-current">
+            <span id="versionPopoverCurrent">v--</span>
+            <span class="version-popover-check" id="versionPopoverIcon">✓</span>
+          </div>
+          <div class="version-popover-state" id="versionPopoverState">正在检测版本</div>
+          <div class="version-popover-actions">
+            <button type="button" onclick="openPanelRelease()">查看发布</button>
+            <button type="button" class="soft" id="versionPopoverUpgrade" onclick="closeVersionPopover(); confirmUpgradePanel();" style="display:none;">升级面板</button>
+          </div>
         </div>
       </div>
       <nav class="nav" aria-label="页面切换">
@@ -1078,6 +1196,8 @@
     let currentRuleExample = '';
     let panelUpdateAvailable = false;
     let panelLatestVersion = '';
+    let panelCurrentVersion = '';
+    let panelRepoUrl = '';
 
     function $(id) {
       return document.getElementById(id);
@@ -1094,10 +1214,46 @@
     function setBusy(next, text) {
       busy = next;
       document.querySelectorAll('button').forEach(button => {
-        if (!button.classList.contains('tab')) button.disabled = next;
+        if (!button.classList.contains('tab') && !button.closest('.version-popover')) button.disabled = next;
       });
       const output = $('commandOutput');
       if (output && next && text) output.textContent = text;
+    }
+
+    function renderVersionPopover(state) {
+      const current = state?.current_version || panelCurrentVersion || '--';
+      const latest = state?.latest_version || panelLatestVersion || '';
+      const hasUpdate = Boolean(state?.update_available || panelUpdateAvailable);
+      const checked = state ? Boolean(state.check_success) : Boolean(panelLatestVersion || panelCurrentVersion);
+      $('versionPopoverCurrent').textContent = 'v' + current;
+      $('versionPopoverIcon').textContent = hasUpdate ? '!' : '✓';
+      $('versionPopoverIcon').style.color = hasUpdate ? '#2563eb' : '#16a34a';
+      $('versionPopoverIcon').style.background = hasUpdate ? '#dbeafe' : '#dcfce7';
+      $('versionPopoverState').textContent = hasUpdate
+        ? '发现新版本 v' + latest
+        : (checked ? '已是最新版本' : '正在检测版本');
+      $('versionPopoverUpgrade').style.display = hasUpdate ? '' : 'none';
+    }
+
+    function closeVersionPopover() {
+      $('versionPopover').classList.remove('show');
+    }
+
+    function toggleVersionPopover(force) {
+      const versionPopover = $('versionPopover');
+      renderVersionPopover();
+      versionPopover.classList.toggle('show', typeof force === 'boolean' ? force : !versionPopover.classList.contains('show'));
+    }
+
+    async function refreshPanelVersionPopover() {
+      renderVersionPopover({current_version: panelCurrentVersion, check_success: false});
+      const res = await loadPanelUpgradeSource();
+      renderVersionPopover(res);
+    }
+
+    function openPanelRelease() {
+      const repo = (panelRepoUrl || 'https://github.com/anxiaoyang666/mosctl').replace(/\.git$/, '');
+      window.open(repo + '/releases', '_blank', 'noopener,noreferrer');
     }
 
     function showView(name) {
@@ -1145,9 +1301,11 @@
       $('serviceState').className = 'stat-value ' + (res.running ? 'ok' : 'bad');
       $('rescueState').textContent = res.rescue ? '已开启' : '未开启';
       $('rescueState').className = 'stat-value ' + (res.rescue ? 'warn' : 'ok');
+      panelCurrentVersion = res.panel_version || panelCurrentVersion || '--';
       $('versionText').textContent = panelUpdateAvailable
         ? 'v' + (res.panel_version || '--') + ' 可更新'
         : 'v' + (res.panel_version || '--');
+      renderVersionPopover();
       $('cacheState').textContent = formatTtl(res.ttl);
       $('versionState').textContent = res.version_clean || res.version || '--';
       $('coreCurrent').textContent = res.version_clean || res.version || '--';
@@ -1227,6 +1385,7 @@
       const res = await api('/api/panel-upgrade-source');
       $('panelRepo').textContent = res.repo_url || '--';
       $('panelBranch').textContent = res.branch || '--';
+      panelRepoUrl = res.repo_url || panelRepoUrl;
       panelUpdateAvailable = Boolean(res.update_available);
       panelLatestVersion = res.latest_version || '';
       $('versionText').classList.toggle('has-update', panelUpdateAvailable);
@@ -1241,6 +1400,9 @@
         : (res.check_success
           ? '当前面板版本 v' + (res.current_version || '--') + '，远端版本 v' + (res.latest_version || '--') + '，无需更新。'
           : (res.message || '当前升级源不是支持的 GitHub 仓库地址，请先检查 .env 里的 MOSCTL_REPO_URL。'));
+      panelCurrentVersion = res.current_version || panelCurrentVersion;
+      renderVersionPopover(res);
+      return res;
     }
 
     function confirmUpgradePanel() {
@@ -1249,11 +1411,8 @@
     }
 
     function handlePanelVersionClick() {
-      if (!panelUpdateAvailable) {
-        loadPanelUpgradeSource();
-        return;
-      }
-      confirmUpgradePanel();
+      toggleVersionPopover();
+      if (!panelLatestVersion) refreshPanelVersionPopover();
     }
 
     async function loadAccountSettings() {

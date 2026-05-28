@@ -983,6 +983,29 @@
           <div class="panel">
             <div class="panel-head">
               <div>
+                <h3>Mosctl 面板升级</h3>
+                <div class="panel-note">从项目仓库拉取最新面板，不覆盖本机配置和规则</div>
+              </div>
+            </div>
+            <div class="grid-2" style="margin-bottom: 12px;">
+              <div>
+                <label>仓库</label>
+                <div class="pill" id="panelRepo">--</div>
+              </div>
+              <div>
+                <label>分支</label>
+                <div class="pill" id="panelBranch">--</div>
+              </div>
+            </div>
+            <div class="hint" id="panelUpgradeHint" style="margin-bottom: 12px;">只更新 Web 面板、mosctl 命令和内置模板；不会覆盖 .env、config.yaml 和 rules。</div>
+            <div class="actions">
+              <button type="button" onclick="loadPanelUpgradeSource()">读取升级源</button>
+              <button type="button" class="soft-danger" onclick="confirmUpgradePanel()">升级 Mosctl 面板</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
                 <h3>默认配置</h3>
                 <div class="panel-note">使用项目内置模板，保留当前上游和 TTL</div>
               </div>
@@ -1072,6 +1095,7 @@
       if (name === 'dashboard') loadDashboardLogs();
       if (name === 'advanced') {
         loadAccountSettings();
+        loadPanelUpgradeSource();
         loadConfig();
       }
       if (name === 'rules') loadRule();
@@ -1170,6 +1194,20 @@
     function confirmUpgradeCore() {
       if (!confirm('升级会替换 /usr/local/bin/mosdns。面板会先备份旧内核，新内核启动失败会自动回滚。确定继续吗？')) return;
       control('upgrade_core');
+    }
+
+    async function loadPanelUpgradeSource() {
+      const res = await api('/api/panel-upgrade-source');
+      $('panelRepo').textContent = res.repo_url || '--';
+      $('panelBranch').textContent = res.branch || '--';
+      $('panelUpgradeHint').textContent = res.supported
+        ? '升级时会从当前仓库分支下载最新代码，并保留本机配置与规则。'
+        : '当前升级源不是支持的 GitHub 仓库地址，请先检查 .env 里的 MOSCTL_REPO_URL。';
+    }
+
+    function confirmUpgradePanel() {
+      if (!confirm('升级会替换 Mosctl Web 面板文件和 /usr/local/bin/mosctl，但不会覆盖 .env、config.yaml 和 rules。升级完成后 Web 服务会自动重启，确定继续吗？')) return;
+      control('upgrade_panel');
     }
 
     async function loadAccountSettings() {

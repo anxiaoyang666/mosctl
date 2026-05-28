@@ -12,6 +12,7 @@ import json
 import stat
 import tempfile
 import zipfile
+from urllib.parse import quote
 
 from flask import Flask, jsonify, redirect, render_template, request, session
 
@@ -22,8 +23,10 @@ CONFIG_FILE = f"{MOSDNS_DIR}/config.yaml"
 DEFAULT_TEMPLATE_FILE = f"{MOSDNS_DIR}/templates/default.yaml"
 BACKUP_DIR = f"{MOSDNS_DIR}/backup"
 LOG_FILE = "/var/log/mosdns.log"
+MANAGER_DIR = f"{MOSDNS_DIR}/manager"
 MOSCTL = "/usr/local/bin/mosctl"
 MOSDNS_BIN = "/usr/local/bin/mosdns"
+SYSTEMD_DIR = "/etc/systemd/system"
 RESCUE_DNS = "223.5.5.5"
 DEFAULT_BACKUP_KEEP_COUNT = 20
 KERNEL_BACKUP_KEEP_COUNT = 3
@@ -34,6 +37,10 @@ MOSDNS_RELEASE_BASE = "https://github.com/IrineSistiana/mosdns/releases/latest/d
 MOSDNS_RELEASE_API = "https://api.github.com/repos/IrineSistiana/mosdns/releases/latest"
 GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
+DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
+DEFAULT_MOSCTL_BRANCH = "main"
+PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
+PANEL_BACKUP_KEEP_COUNT = 3
 
 RULE_FILES = {
     "force-cn": {
@@ -392,6 +399,170 @@ def download_file(urls, target):
         except Exception as exc:
             last_error = str(exc)
     return False, last_error
+
+
+def mosctl_repo_settings():
+    env = read_env()
+    return {
+        "repo_url": env.get("MOSCTL_REPO_URL") or DEFAULT_MOSCTL_REPO_URL,
+        "branch": env.get("MOSCTL_BRANCH") or DEFAULT_MOSCTL_BRANCH,
+    }
+
+
+def github_archive_url(repo_url, branch):
+    repo = str(repo_url or "").strip()
+    repo = repo[:-4] if repo.endswith(".git") else repo
+    match = re.match(r"^https://github\.com/([^/\s]+)/([^/\s]+)$", repo)
+    if not match:
+        return ""
+    owner, name = match.groups()
+    return f"https://github.com/{owner}/{name}/archive/refs/heads/{quote(branch, safe='/')}.zip"
+
+
+def download_mosctl_source(tmpdir):
+    settings = mosctl_repo_settings()
+    archive_url = github_archive_url(settings["repo_url"], settings["branch"])
+    if not archive_url:
+        return False, "仅支持 GitHub 仓库在线升级，请检查 MOSCTL_REPO_URL", None, settings
+
+    zip_path = os.path.join(tmpdir, "mosctl-panel.zip")
+    ok, source = download_file([archive_url, f"https://gh-proxy.com/{archive_url}"], zip_path)
+    if not ok:
+        return False, "下载 Mosctl 面板失败：\n" + source, None, settings
+
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.extractall(tmpdir)
+    except zipfile.BadZipFile:
+        return False, "下载文件不是有效 zip，已取消升级", None, settings
+
+    for root, dirs, _ in os.walk(tmpdir):
+        if "remote-root" in dirs:
+            source_root = os.path.join(root, "remote-root")
+            app_path = os.path.join(source_root, "etc/mosdns/manager/app.py")
+            cli_path = os.path.join(source_root, "usr/local/bin/mosctl")
+            if not os.path.exists(app_path) or not os.path.exists(cli_path):
+                continue
+            ok, message = run_cmd(["python3", "-m", "py_compile", app_path], timeout=20)
+            if not ok:
+                return False, "新面板 app.py 校验失败，已取消升级：\n" + message, None, settings
+            return True, source, source_root, settings
+    return False, "安装包中没有找到有效的 remote-root，已取消升级", None, settings
+
+
+def panel_managed_targets():
+    return [
+        (MANAGER_DIR, "etc/mosdns/manager", "dir", 0o755),
+        (MOSCTL, "usr/local/bin/mosctl", "file", 0o755),
+        (DEFAULT_TEMPLATE_FILE, "etc/mosdns/templates/default.yaml", "file", 0o644),
+        (f"{SYSTEMD_DIR}/mosdns.service", "etc/systemd/system/mosdns.service", "file", 0o644),
+        (f"{SYSTEMD_DIR}/mosdns-rescue.service", "etc/systemd/system/mosdns-rescue.service", "file", 0o644),
+        (f"{SYSTEMD_DIR}/mosdns-web.service", "etc/systemd/system/mosdns-web.service", "file", 0o644),
+        ("/etc/sysctl.d/99-mosdns.conf", "etc/sysctl.d/99-mosdns.conf", "file", 0o644),
+    ]
+
+
+def backup_panel_targets():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    backup_root = f"{BACKUP_DIR}/mosctl-panel.{stamp}"
+    os.makedirs(backup_root, exist_ok=True)
+    manifest = []
+    for target, _, kind, _ in panel_managed_targets():
+        backup_path = os.path.join(backup_root, target.lstrip("/"))
+        existed = os.path.exists(target)
+        manifest.append({"target": target, "kind": kind, "existed": existed})
+        if not existed:
+            continue
+        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+        if os.path.isdir(target):
+            shutil.copytree(target, backup_path)
+        else:
+            shutil.copy2(target, backup_path)
+    with open(os.path.join(backup_root, "manifest.json"), "w", encoding="utf-8") as file:
+        json.dump(manifest, file)
+    return backup_root
+
+
+def restore_panel_backup(backup_root):
+    manifest_path = os.path.join(backup_root, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return
+    with open(manifest_path, "r", encoding="utf-8") as file:
+        manifest = json.load(file)
+    for item in manifest:
+        target = item["target"]
+        backup_path = os.path.join(backup_root, target.lstrip("/"))
+        if os.path.isdir(target):
+            shutil.rmtree(target, ignore_errors=True)
+        elif os.path.exists(target):
+            os.remove(target)
+        if not item.get("existed"):
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if item.get("kind") == "dir":
+            shutil.copytree(backup_path, target)
+        else:
+            shutil.copy2(backup_path, target)
+
+
+def cleanup_panel_backups():
+    backups = [path for path in glob.glob(f"{BACKUP_DIR}/mosctl-panel.*") if os.path.isdir(path)]
+    backups.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    for path in backups[PANEL_BACKUP_KEEP_COUNT:]:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def install_panel_payload(source_root):
+    for target, relative, kind, mode in panel_managed_targets():
+        source = os.path.join(source_root, relative)
+        if not os.path.exists(source):
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if kind == "dir":
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+            os.chmod(target, mode)
+    run_cmd(["systemctl", "daemon-reload"], timeout=20)
+
+
+def schedule_web_restart():
+    subprocess.Popen(
+        ["sh", "-c", "sleep 1; systemctl restart mosdns-web"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+
+def upgrade_mosctl_panel():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ok, source, source_root, settings = download_mosctl_source(tmpdir)
+        if not ok:
+            return False, source
+
+        backup_root = backup_panel_targets()
+        try:
+            install_panel_payload(source_root)
+            cleanup_panel_backups()
+        except Exception as exc:
+            restore_panel_backup(backup_root)
+            run_cmd(["systemctl", "daemon-reload"], timeout=20)
+            return False, "Mosctl 面板升级失败，已回滚旧文件：\n" + str(exc)
+
+    schedule_web_restart()
+    return (
+        True,
+        "Mosctl 面板升级完成，Web 服务将在 1 秒后重启。\n"
+        f"来源：{source}\n"
+        f"仓库：{settings['repo_url']}\n"
+        f"分支：{settings['branch']}\n"
+        f"旧面板备份：{backup_root}\n"
+        "请稍等几秒后刷新页面。"
+    )
 
 
 def upgrade_mosdns_core():
@@ -1149,6 +1320,15 @@ def api_core_version():
     return jsonify(latest_mosdns_release())
 
 
+@app.route("/api/panel-upgrade-source")
+@login_required
+def api_panel_upgrade_source():
+    settings = mosctl_repo_settings()
+    settings["archive_url"] = github_archive_url(settings["repo_url"], settings["branch"])
+    settings["supported"] = bool(settings["archive_url"])
+    return jsonify(settings)
+
+
 @app.route("/api/control", methods=["POST"])
 @login_required
 def api_control():
@@ -1168,6 +1348,9 @@ def api_control():
         return jsonify({"success": ok, "message": message})
     if action == "upgrade_core":
         ok, message = upgrade_mosdns_core()
+        return jsonify({"success": ok, "message": message})
+    if action == "upgrade_panel":
+        ok, message = upgrade_mosctl_panel()
         return jsonify({"success": ok, "message": message})
     if action not in commands:
         return jsonify({"success": False, "message": "未知操作"})

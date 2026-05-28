@@ -462,6 +462,7 @@ def parse_panel_version(text):
 def remote_panel_version(settings=None):
     settings = settings or mosctl_repo_settings()
     raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
+    raw_error = ""
     if not raw_url:
         return {
             "success": False,
@@ -470,17 +471,31 @@ def remote_panel_version(settings=None):
             "message": "仅支持 GitHub 仓库在线检测，请检查 MOSCTL_REPO_URL",
         }
     ok, text, source = read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"], timeout=15)
-    if not ok:
-        return {"success": False, "latest_version": "", "source": "", "message": "检测远端面板版本失败：\n" + text}
-    version = parse_panel_version(text)
-    if not version:
-        return {
-            "success": False,
-            "latest_version": "",
-            "source": source,
-            "message": "远端面板没有版本号，可能是旧版本，已禁止在线升级以避免降级。",
-        }
-    return {"success": True, "latest_version": version, "source": source, "message": ""}
+    if ok:
+        version = parse_panel_version(text)
+        if version:
+            return {"success": True, "latest_version": version, "source": source, "message": ""}
+        raw_error = "raw 文件没有版本号，已改用 zip 包检测。"
+    else:
+        raw_error = "raw 文件检测失败，已改用 zip 包检测：\n" + text
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        zip_ok, zip_source, _, zip_settings = download_mosctl_source(tmpdir)
+        if zip_ok and zip_settings.get("remote_version"):
+            return {
+                "success": True,
+                "latest_version": zip_settings["remote_version"],
+                "source": zip_source,
+                "message": raw_error,
+            }
+        if zip_ok:
+            return {
+                "success": False,
+                "latest_version": "",
+                "source": zip_source,
+                "message": "远端面板没有版本号，可能是旧版本，已禁止在线升级以避免降级。",
+            }
+    return {"success": False, "latest_version": "", "source": source, "message": "检测远端面板版本失败：\n" + raw_error}
 
 
 def panel_upgrade_state():

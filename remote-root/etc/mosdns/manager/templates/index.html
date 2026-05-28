@@ -1146,8 +1146,8 @@
       $('rescueState').textContent = res.rescue ? '已开启' : '未开启';
       $('rescueState').className = 'stat-value ' + (res.rescue ? 'warn' : 'ok');
       $('versionText').textContent = panelUpdateAvailable
-        ? 'Mosctl v' + (res.panel_version || '--') + ' 可更新'
-        : (res.panel_version_text || ('Mosctl v' + (res.panel_version || '--')));
+        ? 'v' + (res.panel_version || '--') + ' 可更新'
+        : 'v' + (res.panel_version || '--');
       $('cacheState').textContent = formatTtl(res.ttl);
       $('versionState').textContent = res.version_clean || res.version || '--';
       $('coreCurrent').textContent = res.version_clean || res.version || '--';
@@ -1234,7 +1234,7 @@
         ? '发现 Mosctl v' + panelLatestVersion + '，点击升级'
         : 'Mosctl 面板已是最新或暂未检测到更新';
       if (panelUpdateAvailable) {
-        $('versionText').textContent = 'Mosctl v' + (res.current_version || '--') + ' 可更新';
+        $('versionText').textContent = 'v' + (res.current_version || '--') + ' 可更新';
       }
       $('panelUpgradeHint').textContent = res.update_available
         ? '发现新面板版本 v' + res.latest_version + '，当前版本 v' + res.current_version + '。'

@@ -1,5 +1,6 @@
 from pathlib import Path
 import ast
+import re
 import unittest
 
 
@@ -57,6 +58,22 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("handlePanelVersionClick", text)
         self.assertIn("setTimeout(() => location.reload(), 5000)", text)
         self.assertIn("upgrade_panel", text)
+
+    def test_panel_version_rolls_forward_for_upgrade_detection(self):
+        text = app_source()
+        match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', text)
+
+        self.assertIsNotNone(match)
+        version = tuple(int(part) for part in match.groups())
+        self.assertGreaterEqual(version, (0, 3, 1))
+
+    def test_sidebar_version_label_does_not_repeat_product_name(self):
+        text = index_source()
+
+        self.assertNotIn("'Mosctl v' + (res.panel_version", text)
+        self.assertNotIn("'Mosctl v' + (res.current_version", text)
+        self.assertIn("'v' + (res.panel_version || '--')", text)
+        self.assertIn("'v' + (res.current_version || '--') + ' 可更新'", text)
 
 
 if __name__ == "__main__":

@@ -68,56 +68,56 @@
       height: 100vh;
       border-right: 1px solid var(--line);
       background: var(--surface);
-      padding: 22px 16px;
+      padding: 18px 16px;
       display: flex;
       flex-direction: column;
-      gap: 26px;
+      gap: 18px;
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 16px;
-      min-height: 72px;
-      padding: 8px 10px 10px;
+      gap: 12px;
+      min-height: 56px;
+      padding: 6px 8px 10px;
     }
     .brand-mark {
-      width: 64px;
-      height: 64px;
-      border-radius: 16px;
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
       display: block;
       flex: 0 0 auto;
-      box-shadow: 0 18px 34px rgba(37, 99, 235, .22);
+      box-shadow: 0 12px 24px rgba(37, 99, 235, .18);
     }
     .brand-copy {
       min-width: 0;
       display: grid;
       justify-items: start;
-      gap: 8px;
+      gap: 6px;
     }
     .brand h1 {
       margin: 0;
-      font-size: 31px;
+      font-size: 24px;
       line-height: 1;
       font-weight: 900;
       letter-spacing: 0;
     }
     .brand-sub {
       color: var(--muted);
-      font-size: 18px;
+      font-size: 14px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      max-width: 138px;
+      max-width: 118px;
     }
     .brand-version {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 34px;
+      min-height: 28px;
       border: 0;
       border-radius: 999px;
       background: #f2f4f7;
-      padding: 0 12px;
+      padding: 0 10px;
       font: inherit;
       line-height: 1;
       text-align: left;
@@ -135,31 +135,31 @@
     }
     .version-popover {
       position: fixed;
-      left: 104px;
-      top: 116px;
+      left: 96px;
+      top: 86px;
       z-index: 30;
-      width: 448px;
+      width: 360px;
       max-width: calc(100vw - 32px);
       display: none;
       overflow: hidden;
       border: 1px solid var(--line);
-      border-radius: 18px;
+      border-radius: 14px;
       background: #fff;
-      box-shadow: 0 24px 58px rgba(16, 24, 40, .16);
+      box-shadow: 0 18px 42px rgba(16, 24, 40, .14);
     }
     .version-popover.show { display: block; }
     .version-popover-head {
-      min-height: 88px;
+      min-height: 64px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 0 28px;
+      gap: 12px;
+      padding: 0 22px;
       border-bottom: 1px solid #eef2f7;
     }
     .version-popover-title {
       margin: 0;
-      font-size: 22px;
+      font-size: 18px;
       font-weight: 850;
       letter-spacing: 0;
     }
@@ -170,20 +170,20 @@
       border: 0;
       color: #98a2b3;
       background: transparent;
-      font-size: 28px;
+      font-size: 22px;
     }
     .version-popover-body {
       display: grid;
       justify-items: center;
-      gap: 12px;
-      padding: 32px 28px 28px;
+      gap: 10px;
+      padding: 26px 22px 22px;
     }
     .version-popover-current {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       color: #101828;
-      font-size: 42px;
+      font-size: 34px;
       line-height: 1;
       font-weight: 900;
     }
@@ -191,22 +191,22 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 34px;
-      height: 34px;
+      width: 28px;
+      height: 28px;
       border-radius: 999px;
       color: #16a34a;
       background: #dcfce7;
-      font-size: 22px;
+      font-size: 18px;
       font-weight: 900;
     }
     .version-popover-state {
       color: var(--muted);
-      font-size: 18px;
+      font-size: 15px;
     }
     .version-popover-actions {
       display: flex;
       gap: 10px;
-      margin-top: 16px;
+      margin-top: 10px;
       flex-wrap: wrap;
       justify-content: center;
     }
@@ -215,7 +215,7 @@
       border: 0;
       color: #667085;
       background: transparent;
-      font-size: 16px;
+      font-size: 14px;
     }
     .nav {
       display: grid;
@@ -223,16 +223,16 @@
     }
     .tab {
       width: 100%;
-      min-height: 54px;
+      min-height: 48px;
       border: 1px solid transparent;
-      border-radius: 12px;
+      border-radius: 10px;
       background: transparent;
       color: var(--text);
       padding: 0 12px;
       text-align: center;
       font: inherit;
-      font-size: 16px;
-      font-weight: 850;
+      font-size: 15px;
+      font-weight: 800;
       cursor: pointer;
       touch-action: manipulation;
       transition: background-color .16s ease, border-color .16s ease, color .16s ease;
@@ -672,7 +672,7 @@
       }
       .version-popover {
         left: 16px;
-        top: 116px;
+        top: 88px;
       }
       .input-actions {
         grid-template-columns: 1fr;

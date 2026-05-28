@@ -65,7 +65,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 3))
+        self.assertGreaterEqual(version, (0, 3, 4))
 
     def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
         text = app_source()
@@ -94,9 +94,14 @@ class PanelUpgradeContractTest(unittest.TestCase):
         text = index_source()
 
         self.assertIn(".brand-copy", text)
-        self.assertIn("width: 64px;", text)
-        self.assertIn("height: 64px;", text)
-        self.assertIn("border-radius: 16px;", text)
+        self.assertIn("width: 48px;", text)
+        self.assertIn("height: 48px;", text)
+        self.assertIn("font-size: 24px;", text)
+        self.assertIn("font-size: 14px;", text)
+        self.assertIn("min-height: 48px;", text)
+        self.assertIn("width: 360px;", text)
+        self.assertNotIn("width: 64px;", text)
+        self.assertNotIn("font-size: 31px;", text)
         self.assertIn("border-radius: 999px;", text)
         self.assertIn("background: #f2f4f7;", text)
         self.assertIn('class="brand-copy"', text)

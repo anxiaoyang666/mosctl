@@ -1,0 +1,13 @@
+*.sh text eol=lf
+remote-root/usr/local/bin/mosctl text eol=lf
+remote-root/etc/systemd/system/* text eol=lf
+remote-root/etc/sysctl.d/* text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.html text eol=lf
+*.svg text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.png binary
+*.ico binary

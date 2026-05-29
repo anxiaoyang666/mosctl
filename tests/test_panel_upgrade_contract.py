@@ -65,7 +65,20 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 7))
+        self.assertGreaterEqual(version, (0, 3, 8))
+
+    def test_logs_are_explained_for_web_dashboard(self):
+        text = app_source()
+        index = index_source()
+
+        self.assertIn("def explain_log_line", text)
+        self.assertIn("def parse_log_entries", text)
+        self.assertIn('"entries": parse_log_entries(logs)', text)
+        self.assertIn("renderDashboardLogs", index)
+        self.assertIn("log-card", index)
+        self.assertIn("log-summary", index)
+        self.assertIn("log-detail", index)
+        self.assertIn("未知日志", index)
 
     def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
         text = app_source()

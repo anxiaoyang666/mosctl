@@ -605,6 +605,70 @@
       min-height: 320px;
       max-height: 420px;
     }
+    .log-list {
+      display: grid;
+      gap: 8px;
+      max-height: 430px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .log-card {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 11px 12px;
+    }
+    .log-card.warn { border-color: #fde68a; background: #fffbeb; }
+    .log-card.error { border-color: #fecaca; background: #fef2f2; }
+    .log-card.notice { border-color: #bfdbfe; background: #eff6ff; }
+    .log-card.debug { background: var(--surface-soft); }
+    .log-level {
+      min-width: 50px;
+      min-height: 24px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #ecfdf5;
+      color: #047857;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .log-card.warn .log-level { background: #fef3c7; color: #b45309; }
+    .log-card.error .log-level { background: #fee2e2; color: #b91c1c; }
+    .log-card.notice .log-level { background: #dbeafe; color: #1d4ed8; }
+    .log-card.debug .log-level { background: #f2f4f7; color: #667085; }
+    .log-main {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+    .log-summary {
+      color: var(--text);
+      font-weight: 650;
+      line-height: 1.35;
+    }
+    .log-meta,
+    .log-detail {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .log-detail {
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+    .log-empty {
+      color: var(--muted);
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      text-align: center;
+    }
     .example-box {
       min-height: 0;
       max-height: none;
@@ -843,7 +907,9 @@
               <button type="button" onclick="loadDashboardLogs()">刷新日志</button>
             </div>
           </div>
-          <pre class="dashboard-log" id="dashboardLogs">正在读取日志</pre>
+          <div class="log-list dashboard-log" id="dashboardLogs">
+            <div class="log-empty">正在读取日志</div>
+          </div>
         </div>
       </section>
 
@@ -1789,7 +1855,47 @@
       const target = $('dashboardLogs');
       if (!target) return;
       const res = await api('/api/logs?lines=80');
-      target.textContent = res.logs || '';
+      renderDashboardLogs(res.entries || [], res.logs || '');
+    }
+
+    function renderDashboardLogs(entries, fallbackText) {
+      const target = $('dashboardLogs');
+      if (!target) return;
+      target.replaceChildren();
+      if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'log-empty';
+        empty.textContent = fallbackText || '未知日志';
+        target.appendChild(empty);
+        return;
+      }
+      entries.forEach(entry => {
+        const card = document.createElement('div');
+        card.className = 'log-card ' + (entry.kind || 'info');
+
+        const level = document.createElement('span');
+        level.className = 'log-level';
+        level.textContent = entry.level || 'INFO';
+
+        const main = document.createElement('div');
+        main.className = 'log-main';
+
+        const summary = document.createElement('div');
+        summary.className = 'log-summary';
+        summary.textContent = entry.summary || '未知日志';
+
+        const meta = document.createElement('div');
+        meta.className = 'log-meta';
+        meta.textContent = [entry.time, entry.component].filter(Boolean).join(' · ');
+
+        const detail = document.createElement('div');
+        detail.className = 'log-detail';
+        detail.textContent = entry.detail || entry.raw || '';
+
+        main.append(summary, meta, detail);
+        card.append(level, main);
+        target.appendChild(card);
+      });
     }
 
     async function loadAll() {

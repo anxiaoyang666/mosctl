@@ -39,7 +39,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.7"
+PANEL_VERSION = "0.3.8"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -108,6 +108,94 @@ def normalize_log_timestamps(text):
         except ValueError:
             lines.append(line)
     return "\n".join(lines)
+
+
+def parse_log_payload(value):
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except ValueError:
+        return {}
+
+
+def explain_log_line(line):
+    parts = (line or "").split("\t")
+    entry = {
+        "time": "",
+        "level": "",
+        "component": "",
+        "summary": "未知日志",
+        "detail": line or "",
+        "raw": line or "",
+        "kind": "info",
+    }
+    if len(parts) < 3:
+        return entry
+
+    entry["time"] = parts[0]
+    entry["level"] = parts[1].upper()
+    entry["kind"] = {
+        "ERROR": "error",
+        "FATAL": "error",
+        "WARN": "warn",
+        "WARNING": "warn",
+        "INFO": "info",
+        "DEBUG": "debug",
+    }.get(entry["level"], "info")
+
+    if len(parts) >= 5:
+        entry["component"] = parts[2]
+        message = parts[3]
+        payload_text = "\t".join(parts[4:])
+    elif len(parts) == 4:
+        message = parts[2]
+        payload_text = parts[3]
+    else:
+        message = parts[2]
+        payload_text = ""
+
+    payload = parse_log_payload(payload_text)
+    tag = payload.get("tag", "")
+    addr = payload.get("addr", "")
+    entries = payload.get("entries", "")
+    error_text = payload.get("error", "")
+
+    if message == "loading plugin":
+        entry["summary"] = f"正在加载模块：{tag or entry['component'] or '未命名'}"
+    elif message == "closing plugin":
+        entry["summary"] = f"正在关闭模块：{tag or entry['component'] or '未命名'}"
+    elif message == "all plugins are loaded":
+        entry["summary"] = "mosdns 已启动，所有模块加载完成"
+    elif message == "all plugins were closed":
+        entry["summary"] = "mosdns 已停止，所有模块已关闭"
+    elif message == "starting api http server":
+        entry["summary"] = f"API 服务已启动：{addr or '地址未知'}"
+    elif message in ("udp server started", "tcp server started"):
+        protocol = "UDP" if "udp" in message else "TCP"
+        entry["summary"] = f"{protocol} DNS 服务已监听：{addr or '地址未知'}"
+    elif message == "cache dump loaded":
+        entry["summary"] = f"缓存已载入：{entries} 条记录" if entries != "" else "缓存已载入"
+    elif message == "cache dumped":
+        entry["summary"] = f"缓存已保存：{entries} 条记录" if entries != "" else "缓存已保存"
+    elif message == "read err" and "closed network connection" in error_text:
+        entry["summary"] = "服务重启或停止时连接被关闭，通常可以忽略"
+        entry["kind"] = "notice"
+    elif message == "read err":
+        entry["summary"] = "读取 DNS 请求时出现异常"
+    else:
+        entry["summary"] = message or entry["summary"]
+
+    if payload_text:
+        entry["detail"] = f"{message} {payload_text}"
+    else:
+        entry["detail"] = message
+    return entry
+
+
+def parse_log_entries(text):
+    return [explain_log_line(line) for line in (text or "").splitlines() if line.strip()]
 
 
 def run_cmd(args, timeout=60):
@@ -1647,7 +1735,7 @@ def api_logs():
     logs = normalize_log_timestamps(output)
     if request.args.get("order", "desc") == "desc":
         logs = "\n".join(reversed(logs.splitlines()))
-    return jsonify({"logs": logs})
+    return jsonify({"logs": logs, "entries": parse_log_entries(logs)})
 
 
 if __name__ == "__main__":

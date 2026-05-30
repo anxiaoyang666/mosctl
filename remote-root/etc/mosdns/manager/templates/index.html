@@ -761,6 +761,7 @@
           </div>
           <div class="version-popover-state" id="versionPopoverState">等待检测</div>
           <div class="version-popover-actions">
+            <button type="button" class="soft-danger" id="versionPopoverUpgrade" onclick="confirmUpgradePanel()" hidden>立即升级</button>
             <button type="button" onclick="refreshPanelVersionPopover()">重新检测</button>
             <button type="button" onclick="openPanelRelease()">打开来源</button>
           </div>
@@ -1403,12 +1404,15 @@
       if (res && res.update_available) {
         $('versionPopoverCheck').textContent = '!';
         $('versionPopoverState').textContent = '发现 v' + res.latest_version + ' 可升级';
+        $('versionPopoverUpgrade').hidden = false;
       } else if (res && res.check_success) {
         $('versionPopoverCheck').textContent = '✓';
         $('versionPopoverState').textContent = '面板已是最新';
+        $('versionPopoverUpgrade').hidden = true;
       } else {
         $('versionPopoverCheck').textContent = '?';
         $('versionPopoverState').textContent = (res && res.message) || '暂未完成检测';
+        $('versionPopoverUpgrade').hidden = true;
       }
     }
 

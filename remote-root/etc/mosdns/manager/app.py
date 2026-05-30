@@ -39,7 +39,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.8"
+PANEL_VERSION = "0.3.9"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -1473,6 +1473,59 @@ def latest_mosdns_release():
     }
 
 
+def service_health_summary(running, enabled, rescue, values):
+    issues = []
+    tone = "ok"
+    state = "healthy"
+    title = "解析服务正常"
+
+    if not running:
+        issues.append("mosdns 当前未运行，客户端 DNS 解析可能不可用")
+        tone = "error"
+        state = "down"
+        title = "解析服务已停止"
+    elif rescue:
+        issues.append(f"救援模式已启用，UDP 53 会被转发到 {RESCUE_DNS}")
+        tone = "warn"
+        state = "rescue"
+        title = "救援模式接管中"
+    elif not enabled:
+        issues.append("mosdns 未设置开机自启，重启系统后需要手动启动")
+        tone = "warn"
+        state = "attention"
+        title = "服务需要关注"
+
+    if not values.get("local_dns"):
+        issues.append("国内上游 DNS 未从配置中识别")
+        if tone == "ok":
+            tone = "warn"
+            state = "attention"
+            title = "配置需要检查"
+    if not values.get("remote_dns"):
+        issues.append("国外上游 DNS 未从配置中识别")
+        if tone == "ok":
+            tone = "warn"
+            state = "attention"
+            title = "配置需要检查"
+    if not values.get("ttl"):
+        issues.append("缓存 TTL 未从配置中识别")
+        if tone == "ok":
+            tone = "warn"
+            state = "attention"
+            title = "配置需要检查"
+
+    if not issues:
+        issues.append("服务运行、开机自启、上游 DNS 与缓存 TTL 均已识别")
+
+    return {
+        "state": state,
+        "tone": tone,
+        "title": title,
+        "issues": issues,
+        "last_checked": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -1508,16 +1561,21 @@ def index():
 def api_status():
     values = parse_config_values()
     env = read_env()
+    running = service_active()
+    enabled = service_enabled()
+    rescue = rescue_enabled()
+    version = get_version()
     return jsonify(
         {
-            "running": service_active(),
-            "enabled": service_enabled(),
-            "rescue": rescue_enabled(),
-            "version": get_version(),
-            "version_clean": clean_version(get_version()),
+            "running": running,
+            "enabled": enabled,
+            "rescue": rescue,
+            "version": version,
+            "version_clean": clean_version(version),
             "panel_version": PANEL_VERSION,
             "panel_version_text": f"Mosctl v{PANEL_VERSION}",
             "web_port": env.get("WEB_PORT", "7840"),
+            "health": service_health_summary(running, enabled, rescue, values),
             **values,
         }
     )

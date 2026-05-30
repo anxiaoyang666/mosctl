@@ -11,14 +11,16 @@
   <style>
     :root {
       color-scheme: light;
-      --bg: #f5f7fb;
-      --panel: #ffffff;
-      --text: #172033;
-      --muted: #667085;
-      --line: #d9e0ea;
-      --primary: #2563eb;
-      --danger: #dc2626;
-      --shadow: 0 16px 48px rgba(23, 32, 51, .12);
+      --bg: #edf2f7;
+      --surface: #ffffff;
+      --ink: #132033;
+      --muted: #65758b;
+      --line: #cfdae8;
+      --primary: #1f66d1;
+      --green: #168a4a;
+      --amber: #b45309;
+      --danger: #c9362c;
+      --shadow: 0 18px 48px rgba(19, 32, 51, .14);
     }
     * { box-sizing: border-box; }
     body {
@@ -26,100 +28,199 @@
       min-height: 100vh;
       display: grid;
       place-items: center;
-      background: var(--bg);
-      color: var(--text);
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 24px;
+      background:
+        linear-gradient(135deg, rgba(31, 102, 209, .13), transparent 36%),
+        linear-gradient(180deg, #f9fbfe 0, var(--bg) 100%);
+      color: var(--ink);
+      font-family: ui-sans-serif, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      letter-spacing: 0;
     }
-    .login {
-      width: min(400px, calc(100vw - 32px));
-      background: var(--panel);
+    .control-room {
+      width: min(920px, 100%);
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(340px, .8fr);
+      gap: 0;
+      overflow: hidden;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .92);
       box-shadow: var(--shadow);
-      padding: 28px;
+    }
+    .briefing {
+      min-height: 460px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 34px;
+      background: #132033;
+      color: #eef5ff;
     }
     .brand {
       display: flex;
       align-items: center;
       gap: 12px;
-      margin-bottom: 22px;
     }
     .brand img {
-      width: 42px;
-      height: 42px;
+      width: 44px;
+      height: 44px;
       border-radius: 10px;
-      box-shadow: 0 8px 18px rgba(37, 99, 235, .22);
+      box-shadow: 0 8px 18px rgba(31, 102, 209, .28);
     }
     h1 {
-      margin: 0 0 3px;
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      margin: 8px 0 0;
+      color: #aebdd0;
+      font-size: 14px;
+    }
+    .headline {
+      margin: 42px 0 0;
+      max-width: 440px;
+      font-size: 34px;
+      line-height: 1.12;
+      font-weight: 850;
+    }
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 34px;
+    }
+    .status-item {
+      border: 1px solid rgba(255, 255, 255, .14);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255, 255, 255, .06);
+    }
+    .status-label {
+      color: #aebdd0;
+      font-size: 12px;
+    }
+    .status-value {
+      margin-top: 7px;
+      font-size: 15px;
+      font-weight: 800;
+    }
+    .login {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 34px;
+      background: var(--surface);
+    }
+    .login h2 {
+      margin: 0;
       font-size: 24px;
       letter-spacing: 0;
     }
-    p {
-      margin: 0;
+    .login p {
+      margin: 7px 0 18px;
       color: var(--muted);
       font-size: 14px;
+      line-height: 1.5;
     }
     label {
       display: block;
-      margin: 14px 0 8px;
-      font-size: 13px;
+      margin: 15px 0 8px;
       color: var(--muted);
+      font-size: 13px;
     }
     input {
       width: 100%;
-      height: 42px;
+      height: 44px;
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 8px;
       padding: 0 12px;
-      font-size: 15px;
-      color: var(--text);
+      color: var(--ink);
       background: #fff;
+      font: inherit;
       outline: none;
     }
     input:focus {
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(37, 99, 235, .14);
+      box-shadow: 0 0 0 3px rgba(31, 102, 209, .16);
     }
     button {
       width: 100%;
-      height: 42px;
+      height: 44px;
       margin-top: 22px;
       border: 0;
-      border-radius: 6px;
+      border-radius: 8px;
       background: var(--primary);
       color: #fff;
-      font-weight: 700;
+      font: inherit;
+      font-weight: 800;
       cursor: pointer;
+    }
+    button:focus-visible {
+      outline: 3px solid rgba(31, 102, 209, .22);
+      outline-offset: 3px;
     }
     .error {
       margin: 0 0 12px;
       padding: 10px 12px;
-      border-radius: 6px;
-      background: #fef2f2;
+      border-radius: 8px;
+      background: #fff1f1;
       color: var(--danger);
-      border: 1px solid #fecaca;
+      border: 1px solid #ffc9c9;
       font-size: 14px;
+    }
+    @media (max-width: 760px) {
+      body { padding: 14px; }
+      .control-room { grid-template-columns: 1fr; }
+      .briefing { min-height: auto; padding: 26px; }
+      .headline { margin-top: 28px; font-size: 28px; }
+      .status-strip { grid-template-columns: 1fr; }
+      .login { padding: 26px; }
     }
   </style>
 </head>
 <body>
-  <form class="login" method="post">
-    <div class="brand">
-      <img src="{{ url_for('static', filename='mosctl-logo.svg') }}" alt="Mosctl">
+  <main class="control-room">
+    <section class="briefing" aria-label="Mosctl 控制台说明">
       <div>
-        <h1>Mosctl</h1>
-        <p>管理面板</p>
+        <div class="brand">
+          <img src="{{ url_for('static', filename='mosctl-logo.svg') }}" alt="Mosctl">
+          <div>
+            <h1>Mosctl 控制台</h1>
+            <p class="subtitle">DNS 运维入口</p>
+          </div>
+        </div>
+        <div class="headline">进入 mosdns 解析服务的运维控制室。</div>
       </div>
-    </div>
-    {% if error %}
-      <div class="error">{{ error }}</div>
-    {% endif %}
-    <label for="username">用户名</label>
-    <input id="username" name="username" autocomplete="username" autofocus>
-    <label for="password">密码</label>
-    <input id="password" name="password" type="password" autocomplete="current-password">
-    <button type="submit">登录</button>
-  </form>
+      <div class="status-strip" aria-label="能力摘要">
+        <div class="status-item">
+          <div class="status-label">监控</div>
+          <div class="status-value">服务态势</div>
+        </div>
+        <div class="status-item">
+          <div class="status-label">策略</div>
+          <div class="status-value">分流规则</div>
+        </div>
+        <div class="status-item">
+          <div class="status-label">维护</div>
+          <div class="status-value">备份升级</div>
+        </div>
+      </div>
+    </section>
+
+    <form class="login" method="post">
+      <h2>登录</h2>
+      <p>使用安装时生成或自定义的 Web 面板账号进入控制台。</p>
+      {% if error %}
+        <div class="error">{{ error }}</div>
+      {% endif %}
+      <label for="username">用户名</label>
+      <input id="username" name="username" autocomplete="username" autofocus>
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password">
+      <button type="submit">进入控制台</button>
+    </form>
+  </main>
 </body>
 </html>

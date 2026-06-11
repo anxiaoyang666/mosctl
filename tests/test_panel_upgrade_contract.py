@@ -56,7 +56,11 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("loadPanelUpgradeSource", text)
         self.assertIn("confirmUpgradePanel", text)
         self.assertIn("handlePanelVersionClick", text)
-        self.assertIn("setTimeout(() => location.reload(), 5000)", text)
+        self.assertIn("function startReloadCountdown", text)
+        self.assertIn("页面将在", text)
+        self.assertIn("setInterval", text)
+        self.assertIn("location.reload()", text)
+        self.assertNotIn("setTimeout(() => location.reload(), 5000)", text)
         self.assertIn("upgrade_panel", text)
 
     def test_panel_version_rolls_forward_for_upgrade_detection(self):
@@ -65,7 +69,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 12))
+        self.assertGreaterEqual(version, (0, 3, 13))
 
     def test_logs_are_explained_for_web_dashboard(self):
         text = app_source()

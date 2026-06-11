@@ -1253,6 +1253,26 @@
       window.toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5200);
     }
 
+    function startReloadCountdown(message, seconds) {
+      let remaining = Math.max(1, Number(seconds || 5));
+      const update = () => {
+        $('toastTitle').textContent = '升级完成';
+        $('toastBody').textContent = `${message || ''}\n\n页面将在 ${remaining} 秒后自动刷新。`;
+        $('toast').classList.add('show');
+      };
+      clearTimeout(window.toastTimer);
+      update();
+      const timer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(timer);
+          location.reload();
+          return;
+        }
+        update();
+      }, 1000);
+    }
+
     function showView(name) {
       if (!viewMeta[name]) return;
       activeView = name;
@@ -1324,9 +1344,10 @@
           body: JSON.stringify({action})
         });
         $('commandOutput').textContent = res.message || '';
-        toast(res.success ? '操作完成' : '操作失败', res.message || '');
         if (action === 'upgrade_panel' && res.success && Number(res.reload_after || 0) > 0) {
-          setTimeout(() => location.reload(), 5000);
+          startReloadCountdown(res.message || '升级完成', Number(res.reload_after || 5));
+        } else {
+          toast(res.success ? '操作完成' : '操作失败', res.message || '');
         }
         await loadStatus();
         if (activeView === 'overview') await loadDashboardLogs();

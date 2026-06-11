@@ -71,7 +71,7 @@ class ConsoleRedesignContractTest(unittest.TestCase):
             "confirmUpgradePanel",
             "handlePanelVersionClick",
             "upgrade_panel",
-            "setTimeout(() => location.reload(), 5000)",
+            "startReloadCountdown",
         ):
             self.assertIn(hook, text)
 

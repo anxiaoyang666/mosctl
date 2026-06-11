@@ -690,6 +690,14 @@
     }
     .toast.show { display: block; }
     .toast-title { font-weight: 850; margin-bottom: 8px; }
+    .toast-countdown {
+      display: none;
+      margin-bottom: 8px;
+      color: var(--accent);
+      font-weight: 700;
+      line-height: 1.35;
+    }
+    .toast-countdown:not(:empty) { display: block; }
     .toast-body {
       color: var(--muted);
       white-space: pre-wrap;
@@ -1208,6 +1216,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite">
     <div class="toast-title" id="toastTitle"></div>
+    <div class="toast-countdown" id="toastCountdown"></div>
     <div class="toast-body" id="toastBody"></div>
   </div>
 
@@ -1247,6 +1256,7 @@
 
     function toast(title, body) {
       $('toastTitle').textContent = title || '';
+      $('toastCountdown').textContent = '';
       $('toastBody').textContent = body || '';
       $('toast').classList.add('show');
       clearTimeout(window.toastTimer);
@@ -1255,9 +1265,11 @@
 
     function startReloadCountdown(message, seconds) {
       let remaining = Math.max(1, Number(seconds || 5));
+      const countdownText = () => `页面将在 ${remaining} 秒后自动刷新。`;
       const update = () => {
         $('toastTitle').textContent = '升级完成';
-        $('toastBody').textContent = `${message || ''}\n\n页面将在 ${remaining} 秒后自动刷新。`;
+        $('toastCountdown').textContent = countdownText();
+        $('toastBody').textContent = message || '';
         $('toast').classList.add('show');
       };
       clearTimeout(window.toastTimer);

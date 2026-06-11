@@ -57,11 +57,20 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("confirmUpgradePanel", text)
         self.assertIn("handlePanelVersionClick", text)
         self.assertIn("function startReloadCountdown", text)
+        self.assertIn('id="toastCountdown"', text)
         self.assertIn("页面将在", text)
         self.assertIn("setInterval", text)
         self.assertIn("location.reload()", text)
         self.assertNotIn("setTimeout(() => location.reload(), 5000)", text)
         self.assertIn("upgrade_panel", text)
+
+    def test_panel_upgrade_countdown_stays_above_scrollable_details(self):
+        text = index_source()
+
+        self.assertIn("toastCountdown", text)
+        self.assertIn("$('toastCountdown').textContent = countdownText()", text)
+        self.assertIn("$('toastBody').textContent = message || ''", text)
+        self.assertNotIn("$('toastBody').textContent = `${message || ''}\\n\\n页面将在", text)
 
     def test_panel_version_rolls_forward_for_upgrade_detection(self):
         text = app_source()
@@ -69,7 +78,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 15))
+        self.assertGreaterEqual(version, (0, 3, 16))
 
     def test_logs_are_explained_for_web_dashboard(self):
         text = app_source()

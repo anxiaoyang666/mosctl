@@ -69,7 +69,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 14))
+        self.assertGreaterEqual(version, (0, 3, 15))
 
     def test_logs_are_explained_for_web_dashboard(self):
         text = app_source()
@@ -88,9 +88,14 @@ class PanelUpgradeContractTest(unittest.TestCase):
         text = app_source()
 
         self.assertIn("def cache_bust_url", text)
+        self.assertIn("def github_contents_app_url", text)
+        self.assertIn("contents_url = github_contents_app_url", text)
+        self.assertIn("parse_github_contents_text", text)
+        self.assertIn("contents_url, f\"https://gh-proxy.com/{raw_url}\", raw_url", text)
         self.assertIn("raw_url = cache_bust_url(raw_url)", text)
         self.assertIn("archive_url = cache_bust_url(archive_url)", text)
-        self.assertIn('read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url]', text)
+        self.assertIn('f"https://gh-proxy.com/{raw_url}"', text)
+        self.assertIn("raw_url", text)
         self.assertIn('download_file([f"https://gh-proxy.com/{archive_url}", archive_url]', text)
         self.assertNotIn('read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"]', text)
         self.assertNotIn('download_file([archive_url, f"https://gh-proxy.com/{archive_url}"]', text)

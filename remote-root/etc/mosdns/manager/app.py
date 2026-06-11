@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from functools import wraps
+import base64
 import glob
 import os
 import re
@@ -39,7 +40,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.14"
+PANEL_VERSION = "0.3.15"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -523,6 +524,25 @@ def github_raw_app_url(repo_url, branch):
     return f"https://raw.githubusercontent.com/{owner}/{name}/{quote(branch, safe='/')}/remote-root/etc/mosdns/manager/app.py"
 
 
+def github_contents_app_url(repo_url, branch):
+    parts = github_repo_parts(repo_url)
+    if not parts:
+        return ""
+    owner, name = parts
+    path = "remote-root/etc/mosdns/manager/app.py"
+    return f"https://api.github.com/repos/{owner}/{name}/contents/{path}?ref={quote(branch, safe='/')}"
+
+
+def parse_github_contents_text(text):
+    data = json.loads(text or "{}")
+    if not isinstance(data, dict):
+        return ""
+    if data.get("encoding") != "base64" or not data.get("content"):
+        return ""
+    payload = str(data.get("content") or "").replace("\n", "")
+    return base64.b64decode(payload).decode("utf-8", "replace")
+
+
 def cache_bust_url(url):
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}_mosctl_ts={int(time.time())}"
@@ -555,8 +575,9 @@ def parse_panel_version(text):
 def remote_panel_version(settings=None):
     settings = settings or mosctl_repo_settings()
     raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
+    contents_url = github_contents_app_url(settings["repo_url"], settings["branch"])
     raw_error = ""
-    if not raw_url:
+    if not raw_url or not contents_url:
         return {
             "success": False,
             "latest_version": "",
@@ -564,8 +585,10 @@ def remote_panel_version(settings=None):
             "message": "仅支持 GitHub 仓库在线检测，请检查 MOSCTL_REPO_URL",
         }
     raw_url = cache_bust_url(raw_url)
-    ok, text, source = read_url_text([f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
+    ok, text, source = read_url_text([contents_url, f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
     if ok:
+        if source == contents_url:
+            text = parse_github_contents_text(text)
         version = parse_panel_version(text)
         if version:
             return {"success": True, "latest_version": version, "source": source, "message": ""}

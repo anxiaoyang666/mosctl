@@ -93,6 +93,16 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("log-detail", index)
         self.assertIn("未知日志", index)
 
+    def test_background_refresh_does_not_show_raw_fetch_failures(self):
+        text = index_source()
+
+        self.assertIn("function formatNetworkError", text)
+        self.assertIn("options?.silent", text)
+        self.assertIn("服务可能正在重启", text)
+        self.assertIn("api('/api/status', {silent: true})", text)
+        self.assertIn("api('/api/logs?lines=' + encodeURIComponent(lines), {silent: true})", text)
+        self.assertNotIn("Failed to fetch", text)
+
     def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
         text = app_source()
 

@@ -1237,13 +1237,29 @@
     let panelLatestVersion = '';
     let panelCurrentVersion = '';
 
-    async function api(url, options) {
-      const res = await fetch(url, options);
-      if (res.status === 401) {
-        location.href = '/login';
-        return {};
+    function formatNetworkError(error) {
+      const raw = String(error && error.message ? error.message : error || '');
+      if ((error && error.name === 'TypeError') || raw.includes('NetworkError')) {
+        return '请求暂时中断，服务可能正在重启，请稍后再试。';
       }
-      return await res.json();
+      return raw || '请求失败，请稍后再试。';
+    }
+
+    async function api(url, options = {}) {
+      try {
+        const res = await fetch(url, options);
+        if (res.status === 401) {
+          location.href = '/login';
+          return {};
+        }
+        return await res.json();
+      } catch (error) {
+        if (options?.silent) {
+          console.debug('Silent API request failed', url, error);
+          return {};
+        }
+        throw new Error(formatNetworkError(error));
+      }
     }
 
     function setBusy(value, message) {
@@ -1328,7 +1344,8 @@
     }
 
     async function loadStatus() {
-      const res = await api('/api/status');
+      const res = await api('/api/status', {silent: true});
+      if (!Object.keys(res || {}).length) return;
       $('running').textContent = res.running ? '运行中' : '已停止';
       $('running').className = 'status-value ' + (res.running ? 'ok' : 'bad');
       $('enabled').textContent = res.enabled ? '已启用' : '未启用';
@@ -1823,7 +1840,8 @@
       const target = $('dashboardLogs');
       if (!target) return;
       const lines = $('logLines') ? $('logLines').value : '80';
-      const res = await api('/api/logs?lines=' + encodeURIComponent(lines));
+      const res = await api('/api/logs?lines=' + encodeURIComponent(lines), {silent: true});
+      if (!Object.keys(res || {}).length) return;
       renderDashboardLogs(res.entries || [], res.logs || '');
     }
 
@@ -1889,10 +1907,12 @@
 
     const initialView = location.hash.replace('#', '');
     if (viewMeta[initialView]) showView(initialView);
-    loadAll();
-    setInterval(loadStatus, 8000);
+    loadAll().catch(error => toast('请求失败', formatNetworkError(error)));
+    setInterval(() => loadStatus().catch(error => console.debug('status refresh failed', error)), 8000);
     setInterval(() => {
-      if (activeView === 'overview' && !busy) loadDashboardLogs();
+      if (activeView === 'overview' && !busy) {
+        loadDashboardLogs().catch(error => console.debug('log refresh failed', error));
+      }
     }, 5000);
   </script>
 </body>

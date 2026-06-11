@@ -1028,7 +1028,7 @@
             <div class="panel-head">
               <div>
                 <h3>规则同步</h3>
-                <div class="panel-note">把强制国内/国外规则同步到其他面板。</div>
+                <div class="panel-note">把强制国内/国外规则同步到其他 mosctl / mihomo 面板。</div>
               </div>
             </div>
             <label class="check-row"><input id="syncEnabled" type="checkbox"> 启用规则同步</label>
@@ -1038,7 +1038,7 @@
               <button type="button" onclick="generateSyncToken()">生成</button>
               <button type="button" onclick="copySyncToken()">复制</button>
             </div>
-            <label for="syncPeers" style="margin-top: 12px;">其他面板地址，每行一个</label>
+            <label for="syncPeers" style="margin-top: 12px;">其他 mosctl / mihomo 面板地址，每行一个</label>
             <textarea class="compact-textarea" id="syncPeers"></textarea>
             <div class="actions" style="margin-top: 10px;">
               <button type="button" class="primary" onclick="saveSyncSettings()">保存同步</button>
@@ -1573,7 +1573,7 @@
         $('syncToken').select();
         document.execCommand('copy');
       }
-      toast('已复制同步密钥', '可以粘贴到其他 mosdns 面板。');
+      toast('已复制同步密钥', '可以粘贴到其他 mosctl / mihomo 面板。');
     }
 
     function renderSyncTestResults(results) {

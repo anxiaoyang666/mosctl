@@ -65,7 +65,7 @@ class PanelUpgradeContractTest(unittest.TestCase):
 
         self.assertIsNotNone(match)
         version = tuple(int(part) for part in match.groups())
-        self.assertGreaterEqual(version, (0, 3, 11))
+        self.assertGreaterEqual(version, (0, 3, 12))
 
     def test_logs_are_explained_for_web_dashboard(self):
         text = app_source()

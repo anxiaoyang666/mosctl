@@ -1072,10 +1072,12 @@
               <div class="actions">
                 <button type="button" class="primary" onclick="saveMihomoSettings()">保存</button>
                 <button type="button" onclick="testMihomoController()">测试</button>
+                <button type="button" onclick="debugMihomoConnections()">调试连接</button>
               </div>
               <p class="hint" id="mihomoSettingsHint">未读取</p>
             </div>
           </div>
+          <pre id="mihomoDebugOutput" style="display:none; min-height:120px; max-height:260px; margin-top:10px"></pre>
           <div class="device-list" id="deviceList">
             <div class="log-empty">正在读取设备</div>
           </div>
@@ -2113,6 +2115,44 @@
         $('mihomoSettingsHint').textContent = res.message || '';
         toast(res.success ? '连接正常' : '连接失败', res.message || '');
         await loadDevices();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderMihomoDebug(samples) {
+      const output = $('mihomoDebugOutput');
+      if (!output) return;
+      output.style.display = '';
+      if (!(samples || []).length) {
+        output.textContent = '没有连接样例。请先打开 YouTube 等外网站点，再点调试连接。';
+        return;
+      }
+      output.textContent = samples.map((item, index) => {
+        return [
+          '#' + (index + 1),
+          '来源 IP: ' + (item.source_ip || '--'),
+          '目标域名: ' + (item.target_domain || '--'),
+          '下载/上传: ' + formatBytes(item.download) + ' / ' + formatBytes(item.upload),
+          '链路: ' + ((item.chains || []).join(' > ') || '--'),
+          '规则: ' + (item.rule || '--'),
+          'metadata: ' + JSON.stringify(item.metadata || {})
+        ].join('\n');
+      }).join('\n\n');
+    }
+
+    async function debugMihomoConnections() {
+      if (busy) return;
+      setBusy(true, '正在读取 mihomo 连接样例...');
+      try {
+        const res = await api('/api/mihomo-debug', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({})
+        });
+        $('mihomoSettingsHint').textContent = res.message || '';
+        renderMihomoDebug(res.samples || []);
+        toast(res.success ? '已读取连接样例' : '读取失败', res.message || '');
       } finally {
         setBusy(false);
       }

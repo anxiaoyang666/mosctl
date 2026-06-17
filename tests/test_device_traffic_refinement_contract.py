@@ -32,6 +32,8 @@ class DeviceTrafficRefinementContractTest(unittest.TestCase):
         self.assertIn("def apply_domain_attributed_traffic", text)
         self.assertIn("attributed_connections", text)
         self.assertIn("traffic_estimated", text)
+        self.assertIn("def mihomo_connection_debug_samples", text)
+        self.assertIn('@app.route("/api/mihomo-debug"', text)
 
     def test_ui_collapses_domain_details_and_shows_traffic_status(self):
         text = index_source()
@@ -53,6 +55,9 @@ class DeviceTrafficRefinementContractTest(unittest.TestCase):
         self.assertIn("留空保留已保存密钥", text)
         self.assertIn("域名归因", text)
         self.assertIn("估算", text)
+        self.assertIn("debugMihomoConnections", text)
+        self.assertIn("mihomoDebugOutput", text)
+        self.assertIn("调试连接", text)
 
 
 if __name__ == "__main__":

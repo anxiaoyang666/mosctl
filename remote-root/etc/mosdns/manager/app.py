@@ -42,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.23"
+PANEL_VERSION = "0.3.24"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -505,6 +505,39 @@ def apply_domain_attributed_traffic(devices_by_ip, connections, known_source_ips
         item["traffic_estimated"] = True
         attributed_connections += 1
     return attributed_connections
+
+
+def mihomo_connection_debug_samples(connections, limit=12):
+    samples = []
+    for connection in connections[:limit]:
+        metadata = connection.get("metadata") if isinstance(connection, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        samples.append(
+            {
+                "source_ip": connection_source_ip(connection),
+                "target_domain": connection_target_domain(connection),
+                "download": first_number(connection.get("download")),
+                "upload": first_number(connection.get("upload")),
+                "chains": connection.get("chains") if isinstance(connection.get("chains"), list) else [],
+                "rule": connection.get("rule", ""),
+                "metadata": {
+                    key: metadata.get(key, "")
+                    for key in (
+                        "host",
+                        "destinationIP",
+                        "destinationPort",
+                        "remoteDestination",
+                        "network",
+                        "type",
+                        "sourceIP",
+                        "sourcePort",
+                    )
+                    if metadata.get(key, "") != ""
+                },
+            }
+        )
+    return samples
 
 
 def read_rule_domains(rule_id):
@@ -2171,6 +2204,22 @@ def api_mihomo_test():
     if ok:
         return jsonify({"success": True, "message": f"连接正常，当前连接数 {len(connections)}", **read_mihomo_settings()})
     return jsonify({"success": False, "message": data.get("error", "mihomo 控制器不可用"), **read_mihomo_settings()})
+
+
+@app.route("/api/mihomo-debug", methods=["POST"])
+@login_required
+def api_mihomo_debug():
+    ok, data = mihomo_api_get("/connections", timeout=3)
+    if not ok:
+        return jsonify({"success": False, "message": data.get("error", "mihomo 控制器不可用"), "samples": []})
+    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    return jsonify(
+        {
+            "success": True,
+            "message": f"已读取 {len(connections)} 条连接，显示前 {min(len(connections), 12)} 条样例",
+            "samples": mihomo_connection_debug_samples(connections),
+        }
+    )
 
 
 @app.route("/api/devices/<path:device_ip>/note", methods=["POST"])

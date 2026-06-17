@@ -42,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.22"
+PANEL_VERSION = "0.3.23"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -374,6 +374,47 @@ def connection_source_ip(connection):
     return ""
 
 
+def normalize_domain(value):
+    domain = str(value or "").strip().strip(".").lower()
+    if not domain:
+        return ""
+    if "/" in domain:
+        domain = domain.split("/", 1)[0]
+    if ":" in domain and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", domain):
+        domain = domain.split(":", 1)[0]
+    if normalize_client_ip(domain):
+        return ""
+    return domain if re.fullmatch(r"[a-z0-9_.-]+", domain) and "." in domain else ""
+
+
+def connection_target_domain(connection):
+    metadata = connection.get("metadata") if isinstance(connection, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    candidates = [
+        metadata.get("host"),
+        metadata.get("sniffHost"),
+        metadata.get("destinationHost"),
+        metadata.get("remoteDestination"),
+        metadata.get("destinationIP"),
+        metadata.get("dnsMode"),
+        connection.get("host"),
+        connection.get("destination"),
+        connection.get("remoteDestination"),
+    ]
+    for candidate in candidates:
+        domain = normalize_domain(candidate)
+        if domain:
+            return domain
+    chains = connection.get("chains") if isinstance(connection, dict) else []
+    if isinstance(chains, list):
+        for candidate in chains:
+            domain = normalize_domain(candidate)
+            if domain:
+                return domain
+    return ""
+
+
 def device_traffic_status(ok, data, matched_connections):
     settings = mihomo_controller_settings()
     connections = data.get("connections") if isinstance(data.get("connections"), list) else []
@@ -383,6 +424,7 @@ def device_traffic_status(ok, data, matched_connections):
         "error": "" if ok else data.get("error", "mihomo 控制器不可用"),
         "connections": len(connections) if ok else 0,
         "matched_connections": matched_connections,
+        "attributed_connections": 0,
     }
 
 
@@ -390,7 +432,7 @@ def collect_mihomo_device_traffic():
     ok, data = mihomo_api_get("/connections")
     traffic = {}
     if not ok:
-        return traffic, device_traffic_status(False, data, 0)
+        return traffic, device_traffic_status(False, data, 0), []
     connections = data.get("connections") if isinstance(data.get("connections"), list) else []
     matched_connections = 0
     for connection in connections:
@@ -404,7 +446,65 @@ def collect_mihomo_device_traffic():
         item["connections"] += 1
     for item in traffic.values():
         item["traffic_total"] = item["traffic_download"] + item["traffic_upload"]
-    return traffic, device_traffic_status(True, data, matched_connections)
+    return traffic, device_traffic_status(True, data, matched_connections), connections
+
+
+def domain_suffixes(domain):
+    domain = normalize_domain(domain)
+    if not domain:
+        return []
+    parts = domain.split(".")
+    return [".".join(parts[index:]) for index in range(len(parts))]
+
+
+def device_domain_index(devices_by_ip):
+    index = {}
+    for ip, item in devices_by_ip.items():
+        for domain_item in item.get("domains", []):
+            domain = normalize_domain(domain_item.get("domain", ""))
+            if not domain:
+                continue
+            index.setdefault(domain, set()).add(ip)
+    return index
+
+
+def apply_domain_attributed_traffic(devices_by_ip, connections, known_source_ips):
+    index = device_domain_index(devices_by_ip)
+    attributed_connections = 0
+    for connection in connections:
+        source_ip = connection_source_ip(connection)
+        if source_ip not in known_source_ips:
+            continue
+        source_item = devices_by_ip.get(source_ip, {})
+        if int(source_item.get("query_count") or 0) or int(source_item.get("domain_count") or 0):
+            continue
+        target_domain = connection_target_domain(connection)
+        if not target_domain:
+            continue
+        candidate_ips = set()
+        for suffix in domain_suffixes(target_domain):
+            candidate_ips.update(index.get(suffix, set()))
+        if len(candidate_ips) != 1:
+            continue
+        target_ip = next(iter(candidate_ips))
+        item = devices_by_ip.setdefault(
+            target_ip,
+            {
+                "ip": target_ip,
+                "last_seen": "",
+                "last_query": "",
+                "query_count": 0,
+                "domain_count": 0,
+                "domains": [],
+            },
+        )
+        item["traffic_download"] = int(item.get("traffic_download") or 0) + first_number(connection.get("download"))
+        item["traffic_upload"] = int(item.get("traffic_upload") or 0) + first_number(connection.get("upload"))
+        item["connections"] = int(item.get("connections") or 0) + 1
+        item["traffic_total"] = int(item.get("traffic_download") or 0) + int(item.get("traffic_upload") or 0)
+        item["traffic_estimated"] = True
+        attributed_connections += 1
+    return attributed_connections
 
 
 def read_rule_domains(rule_id):
@@ -560,7 +660,7 @@ def collect_devices():
     by_ip = {item["ip"]: item for item in parse_device_log_clients(logs)}
     neighbors = read_neighbor_table()
     notes = read_device_notes()
-    traffic_by_ip, traffic_status = collect_mihomo_device_traffic()
+    traffic_by_ip, traffic_status, mihomo_connections = collect_mihomo_device_traffic()
     force_cn = read_rule_domains("force-cn")
     force_nocn = read_rule_domains("force-nocn")
     for ip, neighbor in neighbors.items():
@@ -589,6 +689,8 @@ def collect_devices():
             },
         )
         by_ip[ip].update(traffic)
+    attributed_connections = apply_domain_attributed_traffic(by_ip, mihomo_connections, set(traffic_by_ip.keys()))
+    traffic_status["attributed_connections"] = attributed_connections
 
     devices = []
     for ip, item in by_ip.items():
@@ -622,6 +724,7 @@ def collect_devices():
                 "traffic_upload": int(item.get("traffic_upload") or 0),
                 "traffic_total": int(item.get("traffic_total") or 0),
                 "traffic_connections": int(item.get("connections") or 0),
+                "traffic_estimated": bool(item.get("traffic_estimated")),
             }
         )
 

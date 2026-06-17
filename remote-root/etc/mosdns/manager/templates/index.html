@@ -2205,9 +2205,11 @@
       }
       const connections = status.connections || 0;
       const matched = status.matched_connections || 0;
+      const attributed = status.attributed_connections || 0;
       box.textContent = 'mihomo 控制器：' + (status.controller || '--')
         + '，连接数 ' + connections
         + '，已识别设备连接 ' + matched
+        + (attributed ? '，域名归因 ' + attributed : '')
         + (connections && !matched ? '，暂时没有从连接里识别到来源设备 IP' : '');
       return box;
     }
@@ -2258,6 +2260,9 @@
           + '（下载 ' + formatBytes(device.traffic_download)
           + ' / 上传 ' + formatBytes(device.traffic_upload)
           + ' / 活跃连接 ' + (device.traffic_connections || 0) + '）';
+        if (device.traffic_estimated) {
+          traffic.textContent += '；估算：按 DNS 域名归因';
+        }
         if (!device.traffic_total) {
           traffic.className += ' warn';
           traffic.textContent += '；未看到实时外网流量，需要当前有活跃连接且 mihomo 返回来源设备 IP';

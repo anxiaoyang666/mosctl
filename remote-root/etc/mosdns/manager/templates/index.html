@@ -1055,6 +1055,27 @@
             </div>
             <button type="button" class="soft" onclick="loadDevices()">刷新</button>
           </div>
+          <div class="field-grid">
+            <div class="field">
+              <div class="field-title">mihomo 控制器</div>
+              <label for="mihomoController">用于读取实时连接流量</label>
+              <input id="mihomoController" placeholder="http://10.10.30.2:9090">
+            </div>
+            <div class="field">
+              <div class="field-title">API 密钥</div>
+              <label for="mihomoSecret">对应 mihomo secret，留空表示不修改</label>
+              <input id="mihomoSecret" type="password" autocomplete="off" placeholder="留空保留已保存密钥">
+              <button type="button" style="margin-top:8px" onclick="clearMihomoSecret()">清空密钥</button>
+            </div>
+            <div class="field">
+              <div class="field-title">连接测试</div>
+              <div class="actions">
+                <button type="button" class="primary" onclick="saveMihomoSettings()">保存</button>
+                <button type="button" onclick="testMihomoController()">测试</button>
+              </div>
+              <p class="hint" id="mihomoSettingsHint">未读取</p>
+            </div>
+          </div>
           <div class="device-list" id="deviceList">
             <div class="log-empty">正在读取设备</div>
           </div>
@@ -1366,6 +1387,7 @@
     let busy = false;
     let activeView = 'overview';
     let currentRuleExample = '';
+    const deviceDomainOpenState = {};
     let panelRepoUrl = '';
     let panelUpdateAvailable = false;
     let panelLatestVersion = '';
@@ -1453,7 +1475,7 @@
       $('pageSubtitle').textContent = viewMeta[name][1];
       history.replaceState(null, '', '#' + name);
       if (name === 'overview') loadDashboardLogs();
-      if (name === 'devices') loadDevices();
+      if (name === 'devices') { loadMihomoSettings(); loadDevices(); }
       if (name === 'policy') { loadSettings(); loadRule(); }
       if (name === 'operations') { loadBackups(); loadBackupSettings(); loadSyncSettings(); loadGeoSchedule(); loadPanelUpgradeSource(); }
       if (name === 'advanced') { loadAccountSettings(); loadConfig(); }
@@ -2026,6 +2048,76 @@
       renderDevices(res.devices || [], res.traffic_status || {});
     }
 
+    async function loadMihomoSettings() {
+      const res = await api('/api/mihomo-settings', {silent: true});
+      if (!Object.keys(res || {}).length) return;
+      $('mihomoController').value = res.controller || '';
+      $('mihomoSecret').value = '';
+      $('mihomoSettingsHint').textContent = res.secret_set ? '已保存 API 密钥' : '未设置 API 密钥';
+    }
+
+    async function saveMihomoSettings() {
+      if (busy) return;
+      setBusy(true, '正在保存 mihomo 控制器...');
+      try {
+        const res = await api('/api/mihomo-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            controller: $('mihomoController').value,
+            secret: $('mihomoSecret').value
+          })
+        });
+        $('mihomoSettingsHint').textContent = res.message || '';
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        if (res.success) await loadDevices();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function clearMihomoSecret() {
+      if (busy) return;
+      if (!confirm('确定清空已保存的 mihomo API 密钥吗？')) return;
+      setBusy(true, '正在清空 mihomo 密钥...');
+      try {
+        const res = await api('/api/mihomo-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            controller: $('mihomoController').value,
+            secret: '',
+            clear_secret: true
+          })
+        });
+        $('mihomoSecret').value = '';
+        $('mihomoSettingsHint').textContent = res.message || '';
+        toast(res.success ? '已清空密钥' : '清空失败', res.message || '');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function testMihomoController() {
+      if (busy) return;
+      setBusy(true, '正在测试 mihomo 控制器...');
+      try {
+        const res = await api('/api/mihomo-test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            controller: $('mihomoController').value,
+            secret: $('mihomoSecret').value
+          })
+        });
+        $('mihomoSettingsHint').textContent = res.message || '';
+        toast(res.success ? '连接正常' : '连接失败', res.message || '');
+        await loadDevices();
+      } finally {
+        setBusy(false);
+      }
+    }
+
     function formatBytes(value) {
       const size = Number(value || 0);
       if (size < 1024) return size + ' B';
@@ -2053,6 +2145,11 @@
     function renderDeviceDomains(device) {
       const details = document.createElement('details');
       details.className = 'domain-list';
+      const stateKey = device.ip || '';
+      details.open = Boolean(deviceDomainOpenState[stateKey]);
+      details.addEventListener('toggle', () => {
+        if (stateKey) deviceDomainOpenState[stateKey] = details.open;
+      });
       const summary = document.createElement('summary');
       summary.className = 'device-query';
       summary.textContent = '域名明细';
@@ -2193,7 +2290,10 @@
       await loadStatus();
       await loadPanelUpgradeSource();
       if (activeView === 'overview') await loadDashboardLogs();
-      if (activeView === 'devices') await loadDevices();
+      if (activeView === 'devices') {
+        await loadMihomoSettings();
+        await loadDevices();
+      }
       if (activeView === 'policy') {
         await loadSettings();
         await loadRule();

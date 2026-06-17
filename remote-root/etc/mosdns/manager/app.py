@@ -42,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.21"
+PANEL_VERSION = "0.3.22"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -275,6 +275,33 @@ def mihomo_controller_settings():
     controller = controller.replace("0.0.0.0", "127.0.0.1").replace("[::]", "127.0.0.1")
     secret = os.environ.get("MIHOMO_API_SECRET") or env.get("MIHOMO_API_SECRET") or env.get("MIHOMO_SECRET") or ""
     return {"base_url": controller.rstrip("/"), "secret": secret}
+
+
+def read_mihomo_settings():
+    settings = mihomo_controller_settings()
+    return {
+        "controller": settings["base_url"],
+        "secret_set": bool(settings.get("secret")),
+    }
+
+
+def write_mihomo_settings(data):
+    controller = str(data.get("controller") or "").strip().strip('"').strip("'")
+    secret = str(data.get("secret") or "").strip()
+    if not controller:
+        controller = "127.0.0.1:9090"
+    if not is_safe_text(controller, 300) or "\n" in controller or "\r" in controller:
+        return False, "mihomo 控制器地址不合法"
+    if secret and (not is_safe_text(secret, 300) or "\n" in secret or "\r" in secret):
+        return False, "mihomo 密钥不合法"
+    if "://" not in controller:
+        controller = "http://" + controller
+    updates = {"MIHOMO_CONTROLLER": controller.rstrip("/")}
+    if secret or data.get("clear_secret"):
+        updates["MIHOMO_API_SECRET"] = secret
+    write_env(updates)
+    os.environ.update(updates)
+    return True, "mihomo 控制器设置已保存"
 
 
 def mihomo_api_get(path, timeout=2):
@@ -2018,6 +2045,29 @@ def api_devices():
     data = collect_devices()
     # API shape: {"devices": collect_devices()} legacy contract now expands diagnostics.
     return jsonify({"devices": data["devices"], "traffic_status": data["traffic_status"], "updated_at": int(time.time())})
+
+
+@app.route("/api/mihomo-settings", methods=["GET", "POST"])
+@login_required
+def api_mihomo_settings():
+    if request.method == "GET":
+        return jsonify(read_mihomo_settings())
+    ok, message = write_mihomo_settings(request.json or {})
+    return jsonify({"success": ok, "message": message, **read_mihomo_settings()})
+
+
+@app.route("/api/mihomo-test", methods=["POST"])
+@login_required
+def api_mihomo_test():
+    if request.json:
+        ok, message = write_mihomo_settings(request.json or {})
+        if not ok:
+            return jsonify({"success": False, "message": message, **read_mihomo_settings()})
+    ok, data = mihomo_api_get("/connections", timeout=3)
+    connections = data.get("connections") if ok and isinstance(data.get("connections"), list) else []
+    if ok:
+        return jsonify({"success": True, "message": f"连接正常，当前连接数 {len(connections)}", **read_mihomo_settings()})
+    return jsonify({"success": False, "message": data.get("error", "mihomo 控制器不可用"), **read_mihomo_settings()})
 
 
 @app.route("/api/devices/<path:device_ip>/note", methods=["POST"])

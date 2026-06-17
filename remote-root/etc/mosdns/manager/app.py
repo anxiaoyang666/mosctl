@@ -25,6 +25,7 @@ CONFIG_FILE = f"{MOSDNS_DIR}/config.yaml"
 DEFAULT_TEMPLATE_FILE = f"{MOSDNS_DIR}/templates/default.yaml"
 BACKUP_DIR = f"{MOSDNS_DIR}/backup"
 LOG_FILE = "/var/log/mosdns.log"
+DEVICE_NOTES_FILE = f"{MOSDNS_DIR}/device-notes.json"
 MANAGER_DIR = f"{MOSDNS_DIR}/manager"
 MOSCTL = "/usr/local/bin/mosctl"
 MOSDNS_BIN = "/usr/local/bin/mosdns"
@@ -41,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.19"
+PANEL_VERSION = "0.3.20"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -208,6 +209,132 @@ def run_cmd(args, timeout=60):
         return False, str(exc)
 
 
+def read_json_file(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def write_json_file(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_file = f"{path}.webtmp"
+    with open(tmp_file, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_file, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def read_device_notes():
+    notes = read_json_file(DEVICE_NOTES_FILE, {})
+    return {normalize_client_ip(ip): str(note) for ip, note in notes.items() if normalize_client_ip(ip)}
+
+
+def write_device_note(device_ip, note):
+    ip = normalize_client_ip(device_ip)
+    if not ip:
+        return False, "设备 IP 不合法"
+    note = str(note or "").strip()
+    if not is_safe_text(note, 80):
+        return False, "备注内容不合法或过长"
+    notes = read_device_notes()
+    if note:
+        notes[ip] = note
+    else:
+        notes.pop(ip, None)
+    write_json_file(DEVICE_NOTES_FILE, notes)
+    return True, "备注已保存"
+
+
+def config_value(key):
+    text = read_config_text()
+    match = re.search(rf"(?m)^\s*{re.escape(key)}:\s*['\"]?([^'\"\n#]+)['\"]?\s*$", text)
+    return match.group(1).strip() if match else ""
+
+
+def mihomo_controller_settings():
+    env = read_env()
+    controller = (
+        os.environ.get("MIHOMO_CONTROLLER")
+        or env.get("MIHOMO_CONTROLLER")
+        or env.get("MIHOMO_CONTROLLER_URL")
+        or "127.0.0.1:9090"
+    )
+    controller = str(controller).strip().strip('"').strip("'")
+    if controller.startswith(":"):
+        controller = "127.0.0.1" + controller
+    if "://" not in controller:
+        controller = "http://" + controller
+    controller = controller.replace("0.0.0.0", "127.0.0.1").replace("[::]", "127.0.0.1")
+    secret = os.environ.get("MIHOMO_API_SECRET") or env.get("MIHOMO_API_SECRET") or env.get("MIHOMO_SECRET") or ""
+    return {"base_url": controller.rstrip("/"), "secret": secret}
+
+
+def mihomo_api_get(path, timeout=2):
+    settings = mihomo_controller_settings()
+    headers = {"User-Agent": "mosctl-web-manager"}
+    if settings.get("secret"):
+        headers["Authorization"] = "Bearer " + settings["secret"]
+    try:
+        req = urlrequest.Request(settings["base_url"] + path, headers=headers)
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            return True, json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
+def first_number(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def connection_source_ip(connection):
+    metadata = connection.get("metadata") if isinstance(connection, dict) else {}
+    if not isinstance(metadata, dict):
+        return ""
+    candidates = [
+        connection.get("sourceIP"),
+        connection.get("source"),
+        metadata.get("sourceIP"),
+        metadata.get("sourceIPAddr"),
+        metadata.get("sourceAddress"),
+        metadata.get("host"),
+    ]
+    for candidate in candidates:
+        ip = normalize_client_ip(str(candidate or "").split("%", 1)[0])
+        if ip:
+            return ip
+    return ""
+
+
+def collect_mihomo_device_traffic():
+    ok, data = mihomo_api_get("/connections")
+    traffic = {}
+    if not ok:
+        return traffic
+    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    for connection in connections:
+        ip = connection_source_ip(connection)
+        if not ip:
+            continue
+        item = traffic.setdefault(ip, {"traffic_download": 0, "traffic_upload": 0, "connections": 0})
+        item["traffic_download"] += first_number(connection.get("download"))
+        item["traffic_upload"] += first_number(connection.get("upload"))
+        item["connections"] += 1
+    for item in traffic.values():
+        item["traffic_total"] = item["traffic_download"] + item["traffic_upload"]
+    return traffic
+
+
 def normalize_client_ip(value):
     client = (value or "").strip().strip('"').strip("'")
     if client.startswith("[") and "]" in client:
@@ -252,14 +379,24 @@ def parse_device_log_clients(text):
                 "last_seen": "",
                 "last_query": "",
                 "query_count": 0,
+                "domain_count": 0,
+                "domains": {},
             },
         )
         item["query_count"] += 1
         if timestamp_match and not item["last_seen"]:
             item["last_seen"] = timestamp_match.group(1).replace("T", " ")
         if qname_match:
-            item["last_query"] = qname_match.group(1).rstrip(".")
+            domain = qname_match.group(1).rstrip(".")
+            item["last_query"] = domain
+            item["domains"][domain] = item["domains"].get(domain, 0) + 1
+            item["domain_count"] = len(item["domains"])
 
+    for item in devices.values():
+        item["domains"] = [
+            {"domain": domain, "count": count}
+            for domain, count in sorted(item["domains"].items(), key=lambda entry: entry[1], reverse=True)[:12]
+        ]
     return list(devices.values())
 
 
@@ -315,9 +452,34 @@ def collect_devices():
 
     by_ip = {item["ip"]: item for item in parse_device_log_clients(logs)}
     neighbors = read_neighbor_table()
+    notes = read_device_notes()
+    traffic_by_ip = collect_mihomo_device_traffic()
     for ip, neighbor in neighbors.items():
-        by_ip.setdefault(ip, {"ip": ip, "last_seen": "", "last_query": "", "query_count": 0})
+        by_ip.setdefault(
+            ip,
+            {
+                "ip": ip,
+                "last_seen": "",
+                "last_query": "",
+                "query_count": 0,
+                "domain_count": 0,
+                "domains": [],
+            },
+        )
         by_ip[ip].update(neighbor)
+    for ip, traffic in traffic_by_ip.items():
+        by_ip.setdefault(
+            ip,
+            {
+                "ip": ip,
+                "last_seen": "",
+                "last_query": "",
+                "query_count": 0,
+                "domain_count": 0,
+                "domains": [],
+            },
+        )
+        by_ip[ip].update(traffic)
 
     devices = []
     for ip, item in by_ip.items():
@@ -338,13 +500,24 @@ def collect_devices():
                 "neighbor_state": item.get("neighbor_state", ""),
                 "online": online,
                 "status": status,
+                "note": notes.get(ip, ""),
                 "last_seen": item.get("last_seen", ""),
                 "last_query": item.get("last_query", ""),
                 "query_count": query_count,
+                "domain_count": int(item.get("domain_count") or 0),
+                "domains": item.get("domains", []),
+                "traffic_download": int(item.get("traffic_download") or 0),
+                "traffic_upload": int(item.get("traffic_upload") or 0),
+                "traffic_total": int(item.get("traffic_total") or 0),
+                "traffic_connections": int(item.get("connections") or 0),
             }
         )
 
-    return sorted(devices, key=lambda item: (item["online"], item["last_seen"], item["query_count"]), reverse=True)
+    return sorted(
+        devices,
+        key=lambda item: (item["online"], item["traffic_total"], item["last_seen"], item["query_count"]),
+        reverse=True,
+    )
 
 
 def read_env():
@@ -1755,6 +1928,13 @@ def api_status():
 @login_required
 def api_devices():
     return jsonify({"devices": collect_devices(), "updated_at": int(time.time())})
+
+
+@app.route("/api/devices/<path:device_ip>/note", methods=["POST"])
+@login_required
+def api_device_note(device_ip):
+    ok, message = write_device_note(device_ip, (request.json or {}).get("note", ""))
+    return jsonify({"success": ok, "message": message})
 
 
 @app.route("/api/core-version")

@@ -656,6 +656,38 @@
       line-height: 1.5;
       overflow-wrap: anywhere;
     }
+    .device-note-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .device-note-row input { height: 38px; }
+    .domain-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .domain-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    .domain-name { overflow-wrap: anywhere; }
+    .domain-count {
+      border-radius: 999px;
+      background: var(--primary-soft);
+      color: #0f4fb1;
+      padding: 3px 8px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
     .device-status {
       min-width: 82px;
       border-radius: 999px;
@@ -1963,6 +1995,58 @@
       renderDevices(res.devices || []);
     }
 
+    function formatBytes(value) {
+      const size = Number(value || 0);
+      if (size < 1024) return size + ' B';
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let current = size / 1024;
+      for (let i = 0; i < units.length; i += 1) {
+        if (current < 1024 || i === units.length - 1) return current.toFixed(current >= 10 ? 1 : 2) + ' ' + units[i];
+        current /= 1024;
+      }
+      return size + ' B';
+    }
+
+    async function saveDeviceNote(ip) {
+      const input = document.querySelector('[data-note-ip="' + CSS.escape(ip) + '"]');
+      if (!input) return;
+      const res = await api('/api/devices/' + encodeURIComponent(ip) + '/note', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({note: input.value})
+      });
+      toast(res.success ? '保存备注' : '保存失败', res.message || '');
+      if (res.success) await loadDevices();
+    }
+
+    function renderDeviceDomains(device) {
+      const list = document.createElement('div');
+      list.className = 'domain-list';
+      const title = document.createElement('div');
+      title.className = 'device-query';
+      title.textContent = '域名次数';
+      list.appendChild(title);
+      (device.domains || []).forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'domain-row';
+        const name = document.createElement('div');
+        name.className = 'domain-name';
+        name.textContent = item.domain || '--';
+        const count = document.createElement('div');
+        count.className = 'domain-count';
+        count.textContent = (item.count || 0) + ' 次';
+        row.append(name, count);
+        list.appendChild(row);
+      });
+      if (!(device.domains || []).length) {
+        const empty = document.createElement('div');
+        empty.className = 'device-query';
+        empty.textContent = '暂无域名明细';
+        list.appendChild(empty);
+      }
+      return list;
+    }
+
     function renderDevices(devices) {
       const target = $('deviceList');
       if (!target) return;
@@ -1982,14 +2066,15 @@
         const main = document.createElement('div');
         const title = document.createElement('div');
         title.className = 'device-title';
-        title.textContent = device.ip || '--';
+        title.textContent = (device.note ? device.note + ' · ' : '') + (device.ip || '--');
 
         const meta = document.createElement('div');
         meta.className = 'device-meta';
         [
           'MAC ' + (device.mac || '--'),
           '最近查询 ' + (device.last_seen || '--'),
-          '次数 ' + (device.query_count || 0),
+          'DNS 次数 ' + (device.query_count || 0),
+          '域名数 ' + (device.domain_count || 0),
           '邻居表 ' + (device.neighbor_state || '--')
         ].forEach(text => {
           const item = document.createElement('span');
@@ -2001,11 +2086,31 @@
         query.className = 'device-query';
         query.textContent = '最后域名：' + (device.last_query || '--');
 
+        const traffic = document.createElement('div');
+        traffic.className = 'device-query';
+        traffic.textContent = '外网流量：' + formatBytes(device.traffic_total)
+          + '（下载 ' + formatBytes(device.traffic_download)
+          + ' / 上传 ' + formatBytes(device.traffic_upload)
+          + ' / 活跃连接 ' + (device.traffic_connections || 0) + '）';
+
+        const noteRow = document.createElement('div');
+        noteRow.className = 'device-note-row';
+        const noteInput = document.createElement('input');
+        noteInput.placeholder = '设备备注';
+        noteInput.value = device.note || '';
+        noteInput.dataset.noteIp = device.ip || '';
+        const noteButton = document.createElement('button');
+        noteButton.type = 'button';
+        noteButton.className = 'soft';
+        noteButton.textContent = '保存备注';
+        noteButton.onclick = () => saveDeviceNote(device.ip || '');
+        noteRow.append(noteInput, noteButton);
+
         const status = document.createElement('div');
         status.className = 'device-status ' + (device.online ? 'online' : (device.query_count ? 'recent' : ''));
         status.textContent = device.status || (device.online ? '在线' : '离线');
 
-        main.append(title, meta, query);
+        main.append(title, meta, query, traffic, noteRow, renderDeviceDomains(device));
         card.append(main, status);
         target.appendChild(card);
       });

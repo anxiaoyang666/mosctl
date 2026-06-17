@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 import base64
 import glob
+import ipaddress
 import os
 import re
 import secrets
@@ -205,6 +206,145 @@ def run_cmd(args, timeout=60):
         return result.returncode == 0, clean_output(result.stdout + result.stderr)
     except Exception as exc:
         return False, str(exc)
+
+
+def normalize_client_ip(value):
+    client = (value or "").strip().strip('"').strip("'")
+    if client.startswith("[") and "]" in client:
+        client = client[1 : client.index("]")]
+    if client.startswith("::ffff:"):
+        client = client.removeprefix("::ffff:")
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", client):
+        client = client.rsplit(":", 1)[0]
+    try:
+        return str(ipaddress.ip_address(client))
+    except ValueError:
+        return ""
+
+
+def parse_device_log_clients(text):
+    devices = {}
+    client_patterns = [
+        re.compile(r'"client"\s*:\s*"([^"]+)"'),
+        re.compile(r"\bclient=([^\s,]+)"),
+        re.compile(r"\bfrom\s+([0-9a-fA-F:\.\[\]]+(?::\d+)?)"),
+    ]
+    qname_re = re.compile(r'"qname"\s*:\s*"([^"]+)"')
+    time_re = re.compile(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)")
+
+    for line in (text or "").splitlines():
+        ip = ""
+        for pattern in client_patterns:
+            match = pattern.search(line)
+            if match:
+                ip = normalize_client_ip(match.group(1))
+                if ip:
+                    break
+        if not ip:
+            continue
+
+        qname_match = qname_re.search(line)
+        timestamp_match = time_re.match(line)
+        item = devices.setdefault(
+            ip,
+            {
+                "ip": ip,
+                "last_seen": "",
+                "last_query": "",
+                "query_count": 0,
+            },
+        )
+        item["query_count"] += 1
+        if timestamp_match and not item["last_seen"]:
+            item["last_seen"] = timestamp_match.group(1).replace("T", " ")
+        if qname_match:
+            item["last_query"] = qname_match.group(1).rstrip(".")
+
+    return list(devices.values())
+
+
+def read_neighbor_table():
+    neighbors = {}
+    ok, output = run_cmd(["ip", "neigh"], timeout=10)
+    if ok:
+        for line in output.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            ip = normalize_client_ip(parts[0])
+            if not ip:
+                continue
+            mac = ""
+            if "lladdr" in parts:
+                index = parts.index("lladdr")
+                if index + 1 < len(parts):
+                    mac = parts[index + 1]
+            state = parts[-1] if parts else ""
+            neighbors[ip] = {
+                "mac": mac,
+                "neighbor_state": state,
+                "online": state.upper() in {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"},
+            }
+        return neighbors
+
+    arp_file = "/proc/net/arp"
+    if os.path.exists(arp_file):
+        try:
+            with open(arp_file, "r", encoding="utf-8") as file:
+                for line in file.readlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        ip = normalize_client_ip(parts[0])
+                        if ip:
+                            neighbors[ip] = {
+                                "mac": parts[3],
+                                "neighbor_state": "ARP",
+                                "online": parts[3] != "00:00:00:00:00:00",
+                            }
+        except OSError:
+            pass
+    return neighbors
+
+
+def collect_devices():
+    logs = ""
+    if os.path.exists(LOG_FILE):
+        ok, output = run_cmd(["tail", "-n", "800", LOG_FILE], timeout=10)
+        if ok:
+            logs = normalize_log_timestamps(output)
+
+    by_ip = {item["ip"]: item for item in parse_device_log_clients(logs)}
+    neighbors = read_neighbor_table()
+    for ip, neighbor in neighbors.items():
+        by_ip.setdefault(ip, {"ip": ip, "last_seen": "", "last_query": "", "query_count": 0})
+        by_ip[ip].update(neighbor)
+
+    devices = []
+    for ip, item in by_ip.items():
+        query_count = int(item.get("query_count") or 0)
+        online = bool(item.get("online", False))
+        if online and query_count:
+            status = "在线"
+        elif online:
+            status = "安静在线"
+        elif query_count:
+            status = "最近活跃"
+        else:
+            status = "离线"
+        devices.append(
+            {
+                "ip": ip,
+                "mac": item.get("mac", ""),
+                "neighbor_state": item.get("neighbor_state", ""),
+                "online": online,
+                "status": status,
+                "last_seen": item.get("last_seen", ""),
+                "last_query": item.get("last_query", ""),
+                "query_count": query_count,
+            }
+        )
+
+    return sorted(devices, key=lambda item: (item["online"], item["last_seen"], item["query_count"]), reverse=True)
 
 
 def read_env():
@@ -1609,6 +1749,12 @@ def api_status():
             **values,
         }
     )
+
+
+@app.route("/api/devices")
+@login_required
+def api_devices():
+    return jsonify({"devices": collect_devices(), "updated_at": int(time.time())})
 
 
 @app.route("/api/core-version")

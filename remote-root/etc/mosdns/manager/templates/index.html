@@ -616,6 +616,59 @@
     .log-card.error .log-level { background: #fee2e2; color: #b91c1c; }
     .log-card.notice .log-level { background: #dbeafe; color: #1d4ed8; }
     .log-card.debug .log-level { background: #f2f4f7; color: #667085; }
+    .device-list {
+      display: grid;
+      gap: 10px;
+    }
+    .device-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: start;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 13px;
+    }
+    .device-title {
+      font-size: 17px;
+      font-weight: 850;
+      overflow-wrap: anywhere;
+    }
+    .device-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .device-meta span {
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      background: #fff;
+      padding: 4px 8px;
+    }
+    .device-query {
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .device-status {
+      min-width: 82px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: #f2f4f7;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      text-align: center;
+      white-space: nowrap;
+    }
+    .device-status.online { background: var(--green-soft); color: var(--green); }
+    .device-status.recent { background: var(--amber-soft); color: var(--amber); }
     .log-main { min-width: 0; display: grid; gap: 4px; }
     .log-summary { color: var(--ink); font-weight: 650; line-height: 1.35; }
     .log-meta, .log-detail {
@@ -724,7 +777,7 @@
       .content { padding: 14px; }
       .topbar { flex-direction: column; }
       .toolbar { justify-content: flex-start; }
-      .nav, .sidebar-foot, .status-ribbon, .grid-2, .grid-3, .grid-4, .field-grid, .rule-layout, .backup-item, .sync-test-item, .input-actions {
+      .nav, .sidebar-foot, .status-ribbon, .grid-2, .grid-3, .grid-4, .field-grid, .rule-layout, .backup-item, .sync-test-item, .input-actions, .device-card {
         grid-template-columns: 1fr;
       }
       .resolver-flow { grid-template-columns: 1fr; }
@@ -926,6 +979,22 @@
             </section>
           </aside>
         </div>
+      </section>
+
+
+      <section class="view" id="view-devices">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>设备状态</h3>
+              <div class="panel-note">根据 DNS 日志和系统邻居表判断哪些设备正在使用 mosdns。</div>
+            </div>
+            <button type="button" class="soft" onclick="loadDevices()">刷新</button>
+          </div>
+          <div class="device-list" id="deviceList">
+            <div class="log-empty">正在读取设备</div>
+          </div>
+        </section>
       </section>
 
       <section class="view" id="view-policy">
@@ -1223,6 +1292,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const viewMeta = {
+      devices: ['设备状态', '查看近期使用 DNS 的客户端和在线状态。'],
       overview: ['态势总览', '查看 mosdns 健康状态、解析链路和最近事件。'],
       policy: ['解析策略', '维护上游 DNS、缓存 TTL 和分流规则。'],
       operations: ['运行维护', '处理 Geo 数据、规则同步、备份恢复与升级。'],
@@ -1319,6 +1389,7 @@
       $('pageSubtitle').textContent = viewMeta[name][1];
       history.replaceState(null, '', '#' + name);
       if (name === 'overview') loadDashboardLogs();
+      if (name === 'devices') loadDevices();
       if (name === 'policy') { loadSettings(); loadRule(); }
       if (name === 'operations') { loadBackups(); loadBackupSettings(); loadSyncSettings(); loadGeoSchedule(); loadPanelUpgradeSource(); }
       if (name === 'advanced') { loadAccountSettings(); loadConfig(); }
@@ -1885,10 +1956,65 @@
       });
     }
 
+    async function loadDevices() {
+      const res = await api('/api/devices', {silent: true});
+      if (!Object.keys(res || {}).length) return;
+      renderDevices(res.devices || []);
+    }
+
+    function renderDevices(devices) {
+      const target = $('deviceList');
+      if (!target) return;
+      target.replaceChildren();
+      if (!devices.length) {
+        const empty = document.createElement('div');
+        empty.className = 'log-empty';
+        empty.textContent = '暂时没有看到 DNS 客户端';
+        target.appendChild(empty);
+        return;
+      }
+
+      devices.forEach(device => {
+        const card = document.createElement('div');
+        card.className = 'device-card';
+
+        const main = document.createElement('div');
+        const title = document.createElement('div');
+        title.className = 'device-title';
+        title.textContent = device.ip || '--';
+
+        const meta = document.createElement('div');
+        meta.className = 'device-meta';
+        [
+          'MAC ' + (device.mac || '--'),
+          '最近查询 ' + (device.last_seen || '--'),
+          '次数 ' + (device.query_count || 0),
+          '邻居表 ' + (device.neighbor_state || '--')
+        ].forEach(text => {
+          const item = document.createElement('span');
+          item.textContent = text;
+          meta.appendChild(item);
+        });
+
+        const query = document.createElement('div');
+        query.className = 'device-query';
+        query.textContent = '最后域名：' + (device.last_query || '--');
+
+        const status = document.createElement('div');
+        status.className = 'device-status ' + (device.online ? 'online' : (device.query_count ? 'recent' : ''));
+        status.textContent = device.status || (device.online ? '在线' : '离线');
+
+        main.append(title, meta, query);
+        card.append(main, status);
+        target.appendChild(card);
+      });
+    }
+
     async function loadAll() {
       await loadStatus();
       await loadPanelUpgradeSource();
       if (activeView === 'overview') await loadDashboardLogs();
+      if (activeView === 'devices') await loadDevices();
       if (activeView === 'policy') {
         await loadSettings();
         await loadRule();
@@ -1912,6 +2038,9 @@
     setInterval(() => {
       if (activeView === 'overview' && !busy) {
         loadDashboardLogs().catch(error => console.debug('log refresh failed', error));
+      }
+      if (activeView === 'devices' && !busy) {
+        loadDevices().catch(error => console.debug('device refresh failed', error));
       }
     }, 5000);
   </script>

@@ -35,7 +35,7 @@ class DeviceInsightsContractTest(unittest.TestCase):
         text = index_source()
 
         self.assertIn("保存备注", text)
-        self.assertIn("域名次数", text)
+        self.assertIn("域名明细", text)
         self.assertIn("外网流量", text)
         self.assertIn("formatBytes", text)
         self.assertIn("function saveDeviceNote", text)

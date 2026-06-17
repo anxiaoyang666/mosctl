@@ -656,6 +656,7 @@
       line-height: 1.5;
       overflow-wrap: anywhere;
     }
+    .device-query.warn { color: var(--amber); }
     .device-note-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -667,6 +668,16 @@
       display: grid;
       gap: 6px;
       margin-top: 10px;
+    }
+    .domain-group {
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .domain-group-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
     }
     .domain-row {
       display: grid;
@@ -687,6 +698,26 @@
       padding: 3px 8px;
       font-weight: 850;
       white-space: nowrap;
+    }
+    .domain-route {
+      border-radius: 999px;
+      background: #f2f4f7;
+      color: var(--muted);
+      padding: 3px 8px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .domain-route.cn { background: var(--green-soft); color: var(--green); }
+    .domain-route.nocn { background: var(--amber-soft); color: var(--amber); }
+    .traffic-status {
+      margin-bottom: 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
     }
     .device-status {
       min-width: 82px;
@@ -1992,7 +2023,7 @@
     async function loadDevices() {
       const res = await api('/api/devices', {silent: true});
       if (!Object.keys(res || {}).length) return;
-      renderDevices(res.devices || []);
+      renderDevices(res.devices || [], res.traffic_status || {});
     }
 
     function formatBytes(value) {
@@ -2020,37 +2051,75 @@
     }
 
     function renderDeviceDomains(device) {
-      const list = document.createElement('div');
-      list.className = 'domain-list';
-      const title = document.createElement('div');
-      title.className = 'device-query';
-      title.textContent = '域名次数';
-      list.appendChild(title);
-      (device.domains || []).forEach(item => {
-        const row = document.createElement('div');
-        row.className = 'domain-row';
-        const name = document.createElement('div');
-        name.className = 'domain-name';
-        name.textContent = item.domain || '--';
-        const count = document.createElement('div');
-        count.className = 'domain-count';
-        count.textContent = (item.count || 0) + ' 次';
-        row.append(name, count);
-        list.appendChild(row);
-      });
-      if (!(device.domains || []).length) {
+      const details = document.createElement('details');
+      details.className = 'domain-list';
+      const summary = document.createElement('summary');
+      summary.className = 'device-query';
+      summary.textContent = '域名明细';
+      details.appendChild(summary);
+      const domains = device.domains || [];
+      if (!domains.length) {
         const empty = document.createElement('div');
         empty.className = 'device-query';
         empty.textContent = '暂无域名明细';
-        list.appendChild(empty);
+        details.appendChild(empty);
+        return details;
       }
-      return list;
+      [
+        {title: '国内', route: '国内', className: 'cn'},
+        {title: '国外', route: '国外', className: 'nocn'},
+        {title: '默认', route: '默认', className: ''}
+      ].forEach(group => {
+        const items = domains.filter(item => (item.route || '默认') === group.route);
+        if (!items.length) return;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'domain-group';
+        const title = document.createElement('div');
+        title.className = 'domain-group-title';
+        title.textContent = group.title + ' · ' + items.length;
+        wrapper.appendChild(title);
+        items.forEach(item => {
+          const row = document.createElement('div');
+          row.className = 'domain-row';
+          const name = document.createElement('div');
+          name.className = 'domain-name';
+          name.textContent = item.domain || '--';
+          const route = document.createElement('div');
+          route.className = 'domain-route ' + group.className;
+          route.textContent = item.route || '默认';
+          const count = document.createElement('div');
+          count.className = 'domain-count';
+          count.textContent = (item.count || 0) + ' 次';
+          row.append(name, route, count);
+          wrapper.appendChild(row);
+        });
+        details.appendChild(wrapper);
+      });
+      return details;
     }
 
-    function renderDevices(devices) {
+    function renderTrafficStatus(status) {
+      const box = document.createElement('div');
+      box.className = 'traffic-status';
+      const reachable = status && status.reachable;
+      if (!reachable) {
+        box.textContent = 'mihomo 控制器不可用：' + ((status && status.error) || '请检查 MIHOMO_CONTROLLER 和 MIHOMO_API_SECRET');
+        return box;
+      }
+      const connections = status.connections || 0;
+      const matched = status.matched_connections || 0;
+      box.textContent = 'mihomo 控制器：' + (status.controller || '--')
+        + '，连接数 ' + connections
+        + '，已识别设备连接 ' + matched
+        + (connections && !matched ? '，暂时没有从连接里识别到来源设备 IP' : '');
+      return box;
+    }
+
+    function renderDevices(devices, trafficStatus = {}) {
       const target = $('deviceList');
       if (!target) return;
       target.replaceChildren();
+      target.appendChild(renderTrafficStatus(trafficStatus));
       if (!devices.length) {
         const empty = document.createElement('div');
         empty.className = 'log-empty';
@@ -2092,6 +2161,10 @@
           + '（下载 ' + formatBytes(device.traffic_download)
           + ' / 上传 ' + formatBytes(device.traffic_upload)
           + ' / 活跃连接 ' + (device.traffic_connections || 0) + '）';
+        if (!device.traffic_total) {
+          traffic.className += ' warn';
+          traffic.textContent += '；未看到实时外网流量，需要当前有活跃连接且 mihomo 返回来源设备 IP';
+        }
 
         const noteRow = document.createElement('div');
         noteRow.className = 'device-note-row';

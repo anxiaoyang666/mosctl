@@ -42,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.20"
+PANEL_VERSION = "0.3.21"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -297,42 +297,122 @@ def first_number(value):
         return 0
 
 
+def normalize_connection_ip(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = raw.split("%", 1)[0]
+    ip = normalize_client_ip(raw)
+    if ip:
+        return ip
+    match = re.search(r"(?:\d{1,3}\.){3}\d{1,3}", raw)
+    if match:
+        return normalize_client_ip(match.group(0))
+    return ""
+
+
 def connection_source_ip(connection):
     metadata = connection.get("metadata") if isinstance(connection, dict) else {}
     if not isinstance(metadata, dict):
         return ""
     candidates = [
         connection.get("sourceIP"),
+        connection.get("sourceIp"),
+        connection.get("source_ip"),
+        connection.get("sourceAddr"),
+        connection.get("sourceAddress"),
+        connection.get("clientIP"),
+        connection.get("clientIp"),
+        connection.get("client_ip"),
+        connection.get("client"),
         connection.get("source"),
+        connection.get("addr"),
         metadata.get("sourceIP"),
+        metadata.get("sourceIp"),
         metadata.get("sourceIPAddr"),
+        metadata.get("sourceAddr"),
         metadata.get("sourceAddress"),
+        metadata.get("clientIP"),
+        metadata.get("clientIp"),
+        metadata.get("client_ip"),
+        metadata.get("client"),
+        metadata.get("inboundIp"),
+        metadata.get("inboundIP"),
         metadata.get("host"),
     ]
     for candidate in candidates:
-        ip = normalize_client_ip(str(candidate or "").split("%", 1)[0])
+        ip = normalize_connection_ip(candidate)
         if ip:
             return ip
     return ""
+
+
+def device_traffic_status(ok, data, matched_connections):
+    settings = mihomo_controller_settings()
+    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    return {
+        "controller": settings["base_url"],
+        "reachable": bool(ok),
+        "error": "" if ok else data.get("error", "mihomo 控制器不可用"),
+        "connections": len(connections) if ok else 0,
+        "matched_connections": matched_connections,
+    }
 
 
 def collect_mihomo_device_traffic():
     ok, data = mihomo_api_get("/connections")
     traffic = {}
     if not ok:
-        return traffic
+        return traffic, device_traffic_status(False, data, 0)
     connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    matched_connections = 0
     for connection in connections:
         ip = connection_source_ip(connection)
         if not ip:
             continue
+        matched_connections += 1
         item = traffic.setdefault(ip, {"traffic_download": 0, "traffic_upload": 0, "connections": 0})
         item["traffic_download"] += first_number(connection.get("download"))
         item["traffic_upload"] += first_number(connection.get("upload"))
         item["connections"] += 1
     for item in traffic.values():
         item["traffic_total"] = item["traffic_download"] + item["traffic_upload"]
-    return traffic
+    return traffic, device_traffic_status(True, data, matched_connections)
+
+
+def read_rule_domains(rule_id):
+    path = RULE_FILES.get(rule_id, {}).get("path")
+    if not path or not os.path.exists(path):
+        return set()
+    domains = set()
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            for line in file:
+                value = line.split("#", 1)[0].strip().lstrip(".")
+                if value:
+                    domains.add(value.lower())
+    except OSError:
+        pass
+    return domains
+
+
+def domain_matches_rule(domain, rules):
+    domain = (domain or "").strip(".").lower()
+    if not domain:
+        return False
+    parts = domain.split(".")
+    candidates = [".".join(parts[index:]) for index in range(len(parts))]
+    return any(candidate in rules for candidate in candidates)
+
+
+def classify_device_domain(domain, force_cn=None, force_nocn=None):
+    force_cn = force_cn if force_cn is not None else read_rule_domains("force-cn")
+    force_nocn = force_nocn if force_nocn is not None else read_rule_domains("force-nocn")
+    if domain_matches_rule(domain, force_nocn):
+        return "国外"
+    if domain_matches_rule(domain, force_cn):
+        return "国内"
+    return "默认"
 
 
 def normalize_client_ip(value):
@@ -453,7 +533,9 @@ def collect_devices():
     by_ip = {item["ip"]: item for item in parse_device_log_clients(logs)}
     neighbors = read_neighbor_table()
     notes = read_device_notes()
-    traffic_by_ip = collect_mihomo_device_traffic()
+    traffic_by_ip, traffic_status = collect_mihomo_device_traffic()
+    force_cn = read_rule_domains("force-cn")
+    force_nocn = read_rule_domains("force-nocn")
     for ip, neighbor in neighbors.items():
         by_ip.setdefault(
             ip,
@@ -505,7 +587,10 @@ def collect_devices():
                 "last_query": item.get("last_query", ""),
                 "query_count": query_count,
                 "domain_count": int(item.get("domain_count") or 0),
-                "domains": item.get("domains", []),
+                "domains": [
+                    {**domain, "route": classify_device_domain(domain.get("domain", ""), force_cn, force_nocn)}
+                    for domain in item.get("domains", [])
+                ],
                 "traffic_download": int(item.get("traffic_download") or 0),
                 "traffic_upload": int(item.get("traffic_upload") or 0),
                 "traffic_total": int(item.get("traffic_total") or 0),
@@ -513,11 +598,14 @@ def collect_devices():
             }
         )
 
-    return sorted(
-        devices,
-        key=lambda item: (item["online"], item["traffic_total"], item["last_seen"], item["query_count"]),
-        reverse=True,
-    )
+    return {
+        "devices": sorted(
+            devices,
+            key=lambda item: (item["online"], item["traffic_total"], item["last_seen"], item["query_count"]),
+            reverse=True,
+        ),
+        "traffic_status": traffic_status,
+    }
 
 
 def read_env():
@@ -1927,7 +2015,9 @@ def api_status():
 @app.route("/api/devices")
 @login_required
 def api_devices():
-    return jsonify({"devices": collect_devices(), "updated_at": int(time.time())})
+    data = collect_devices()
+    # API shape: {"devices": collect_devices()} legacy contract now expands diagnostics.
+    return jsonify({"devices": data["devices"], "traffic_status": data["traffic_status"], "updated_at": int(time.time())})
 
 
 @app.route("/api/devices/<path:device_ip>/note", methods=["POST"])

@@ -2246,6 +2246,14 @@
       const connections = status.connections || 0;
       const matched = status.matched_connections || 0;
       const attributed = status.attributed_connections || 0;
+      if (status.source_ip_collapsed) {
+        box.textContent = 'mihomo 控制器：' + (status.controller || '--')
+          + '，连接数 ' + connections
+          + '，只能看到网关 IP ' + (status.dominant_source_ip || '--')
+          + '，无法按终端精确统计'
+          + (attributed ? '，域名归因估算 ' + attributed : '');
+        return box;
+      }
       box.textContent = 'mihomo 控制器：' + (status.controller || '--')
         + '，连接数 ' + connections
         + '，已识别设备连接 ' + matched
@@ -2305,7 +2313,9 @@
         }
         if (!device.traffic_total) {
           traffic.className += ' warn';
-          traffic.textContent += '；未看到实时外网流量，需要当前有活跃连接且 mihomo 返回来源设备 IP';
+          traffic.textContent += trafficStatus.source_ip_collapsed
+            ? '；当前 mihomo 只能看到网关 IP，无法按终端精确统计'
+            : '；未看到实时外网流量，需要当前有活跃连接且 mihomo 返回来源设备 IP';
         }
 
         const noteRow = document.createElement('div');

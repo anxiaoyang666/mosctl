@@ -34,6 +34,8 @@ class DeviceTrafficRefinementContractTest(unittest.TestCase):
         self.assertIn("traffic_estimated", text)
         self.assertIn("def mihomo_connection_debug_samples", text)
         self.assertIn('@app.route("/api/mihomo-debug"', text)
+        self.assertIn("dominant_source_ip", text)
+        self.assertIn("source_ip_collapsed", text)
 
     def test_ui_collapses_domain_details_and_shows_traffic_status(self):
         text = index_source()
@@ -58,6 +60,8 @@ class DeviceTrafficRefinementContractTest(unittest.TestCase):
         self.assertIn("debugMihomoConnections", text)
         self.assertIn("mihomoDebugOutput", text)
         self.assertIn("调试连接", text)
+        self.assertIn("只能看到网关 IP", text)
+        self.assertIn("无法按终端精确统计", text)
 
 
 if __name__ == "__main__":

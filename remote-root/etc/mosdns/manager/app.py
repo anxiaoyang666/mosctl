@@ -42,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.24"
+PANEL_VERSION = "0.3.25"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -415,9 +415,15 @@ def connection_target_domain(connection):
     return ""
 
 
-def device_traffic_status(ok, data, matched_connections):
+def device_traffic_status(ok, data, matched_connections, source_counts=None):
     settings = mihomo_controller_settings()
     connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    source_counts = source_counts or {}
+    dominant_source_ip = ""
+    dominant_source_count = 0
+    if source_counts:
+        dominant_source_ip, dominant_source_count = max(source_counts.items(), key=lambda item: item[1])
+    source_ip_collapsed = bool(dominant_source_ip and len(connections) >= 3 and dominant_source_count / max(1, len(connections)) >= 0.8)
     return {
         "controller": settings["base_url"],
         "reachable": bool(ok),
@@ -425,6 +431,9 @@ def device_traffic_status(ok, data, matched_connections):
         "connections": len(connections) if ok else 0,
         "matched_connections": matched_connections,
         "attributed_connections": 0,
+        "dominant_source_ip": dominant_source_ip,
+        "dominant_source_count": dominant_source_count,
+        "source_ip_collapsed": source_ip_collapsed,
     }
 
 
@@ -435,18 +444,20 @@ def collect_mihomo_device_traffic():
         return traffic, device_traffic_status(False, data, 0), []
     connections = data.get("connections") if isinstance(data.get("connections"), list) else []
     matched_connections = 0
+    source_counts = {}
     for connection in connections:
         ip = connection_source_ip(connection)
         if not ip:
             continue
         matched_connections += 1
+        source_counts[ip] = source_counts.get(ip, 0) + 1
         item = traffic.setdefault(ip, {"traffic_download": 0, "traffic_upload": 0, "connections": 0})
         item["traffic_download"] += first_number(connection.get("download"))
         item["traffic_upload"] += first_number(connection.get("upload"))
         item["connections"] += 1
     for item in traffic.values():
         item["traffic_total"] = item["traffic_download"] + item["traffic_upload"]
-    return traffic, device_traffic_status(True, data, matched_connections), connections
+    return traffic, device_traffic_status(True, data, matched_connections, source_counts), connections
 
 
 def domain_suffixes(domain):

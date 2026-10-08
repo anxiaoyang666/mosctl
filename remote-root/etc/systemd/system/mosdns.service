@@ -1,12 +1,16 @@
 [Unit]
 Description=MosDNS Service
 After=network.target
+# 连续启动失败达到上限后单元进入 failed，才会触发 OnFailure 的救援模式。
+# 不能用 StartLimitInterval=0（无限重启），否则永远到不了 failed 状态。
+StartLimitIntervalSec=60
+StartLimitBurst=5
 OnFailure=mosdns-rescue.service
 [Service]
-StartLimitInterval=0
 Type=simple
-ExecStartPre=-/usr/local/bin/mosctl rescue disable silent
 ExecStart=/usr/local/bin/mosdns start -d /etc/mosdns
+# 启动成功后再关闭救援模式；放在 ExecStartPre 会在崩溃循环里每 3 秒拆一次救援规则
+ExecStartPost=-/bin/sh -c 'sleep 2; /usr/local/bin/mosctl rescue disable silent'
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535

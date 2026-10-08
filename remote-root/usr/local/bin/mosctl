@@ -2,9 +2,14 @@
 # MosDNS 管理工具 v0.3.9
 RESCUE_DNS="223.5.5.5"
 ENV_FILE="/etc/mosdns/.env"
-[ -f "$ENV_FILE" ] && . "$ENV_FILE"
-REPO_URL="${MOSCTL_REPO_URL:-}"
-REPO_BRANCH="${MOSCTL_BRANCH:-main}"
+# 只读取需要的键，不 source 整个文件：.env 的值来自 Web 面板，不能当作 shell 代码执行
+env_get() {
+    [ -f "$ENV_FILE" ] || return 0
+    grep -E "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+REPO_URL="$(env_get MOSCTL_REPO_URL)"
+REPO_BRANCH="$(env_get MOSCTL_BRANCH)"
+REPO_BRANCH="${REPO_BRANCH:-main}"
 GH_PROXY="https://gh-proxy.com/"
 CONFIG_FILE="/etc/mosdns/config.yaml"
 KERNEL_VERSION="v5.3.4"

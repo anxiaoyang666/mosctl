@@ -42,7 +42,7 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.25"
+PANEL_VERSION = "0.3.26"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
 
@@ -290,9 +290,9 @@ def write_mihomo_settings(data):
     secret = str(data.get("secret") or "").strip()
     if not controller:
         controller = "127.0.0.1:9090"
-    if not is_safe_text(controller, 300) or "\n" in controller or "\r" in controller:
+    if not is_safe_text(controller, 300) or env_value_error(controller):
         return False, "mihomo 控制器地址不合法"
-    if secret and (not is_safe_text(secret, 300) or "\n" in secret or "\r" in secret):
+    if secret and (not is_safe_text(secret, 300) or env_value_error(secret)):
         return False, "mihomo 密钥不合法"
     if "://" not in controller:
         controller = "http://" + controller
@@ -796,7 +796,25 @@ def read_env():
     return env
 
 
+ENV_VALUE_FORBIDDEN = '"\\$`\r\n\x00'
+
+
+def env_value_error(value):
+    # .env 会被 bash、systemd EnvironmentFile 和 read_env 三种方式解析，
+    # 这几个字符在三者之间语义不一致，还可能被当作命令执行，统一拒绝。
+    if not isinstance(value, str):
+        return "值必须是字符串"
+    for char in ENV_VALUE_FORBIDDEN:
+        if char in value:
+            return '不能包含引号、反斜杠、$、反引号或换行'
+    return None
+
+
 def write_env(updates):
+    for key, value in updates.items():
+        error = env_value_error(value)
+        if error:
+            raise ValueError(f"{key}: {error}")
     os.makedirs(MOSDNS_DIR, exist_ok=True)
     lines = []
     if os.path.exists(ENV_FILE):
@@ -1589,8 +1607,11 @@ def write_sync_settings(data):
     token = str(data.get("token") or "").strip()
     if not token:
         token = secrets.token_urlsafe(24)
-    if not is_safe_text(token, 200) or "\n" in token or "\r" in token:
-        return False, "同步密钥不合法"
+    if not is_safe_text(token, 200) or env_value_error(token):
+        return False, "同步密钥不合法：" + (env_value_error(token) or "过长")
+    for peer in peers:
+        if env_value_error(peer):
+            return False, f"同步节点地址不合法：{peer}"
     write_env(
         {
             "RULE_SYNC_ENABLED": str(is_true(data.get("enabled"))).lower(),
@@ -1614,14 +1635,14 @@ def write_account_settings(data):
     confirm = str(data.get("confirm") or "")
     if not username:
         return False, "用户名不能为空"
-    if not is_safe_text(username, 64) or any(char.isspace() for char in username):
-        return False, "用户名不能包含空格或换行，最多 64 个字符"
+    if not is_safe_text(username, 64) or any(char.isspace() for char in username) or env_value_error(username):
+        return False, "用户名不能包含空格、引号或特殊符号，最多 64 个字符"
     updates = {"WEB_USER": username}
     if password or confirm:
         if password != confirm:
             return False, "两次输入的新密码不一致"
-        if len(password) < 6 or not is_safe_text(password, 200) or "\n" in password or "\r" in password:
-            return False, "新密码至少 6 位，且不能包含换行"
+        if len(password) < 6 or not is_safe_text(password, 200) or env_value_error(password):
+            return False, "新密码至少 6 位，且" + (env_value_error(password) or "不能过长")
         updates["WEB_SECRET"] = password
     write_env(updates)
     os.environ.update(updates)

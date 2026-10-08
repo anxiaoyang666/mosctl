@@ -24,11 +24,12 @@ class RuleFilesContractTest(unittest.TestCase):
         text = CLI.read_text(encoding="utf-8")
         self.assertIn('dl "/etc/mosdns/rules/geosite_cn.txt"', text)
         self.assertIn('dl "/etc/mosdns/rules/geosite_no_cn.txt"', text)
-        self.assertNotIn('dl "/etc/mosdns/rules/geoip_cn.txt"', text)
-        self.assertNotIn('dl "/etc/mosdns/rules/geosite_apple.txt"', text)
         self.assertNotIn('edit_rule "/etc/mosdns/rules/user_iot.txt"', text)
         self.assertNotIn("智能家居直连", text)
-        self.assertIn("rm -f /etc/mosdns/rules/geoip_cn.txt /etc/mosdns/rules/geosite_apple.txt", text)
+        # 只删当前配置不引用的旧文件（老模板仍引用时删掉会让 mosdns 起不来）
+        self.assertIn('config_uses_rule "$obsolete" || rm -f "/etc/mosdns/rules/$obsolete"', text)
+        self.assertNotIn("rm -f /etc/mosdns/rules/geoip_cn.txt /etc/mosdns/rules/geosite_apple.txt", text)
+        self.assertIn('if config_uses_rule geoip_cn.txt; then', text)
 
     def test_geo_cron_logs_and_legacy_entries_are_migrated(self):
         text = APP.read_text(encoding="utf-8")

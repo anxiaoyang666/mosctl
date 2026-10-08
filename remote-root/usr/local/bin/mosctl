@@ -468,20 +468,28 @@ update_geo_rules() {
     return 1
 }
 
+# config.yaml 是否引用了某个规则文件（老版本模板会引用 geoip_cn / geosite_apple / user_iot / local-ptr）
+config_uses_rule() {
+    [ -f "$CONFIG_FILE" ] && grep -qF "/etc/mosdns/rules/$1" "$CONFIG_FILE"
+}
+
 do_update_geo_rules() {
     echo -e "${YELLOW}⬇️  正在更新 GeoSite...${PLAIN}"
     mkdir -p /etc/mosdns/rules
-    # 旧版本会下载 geoip_cn / geosite_apple 并带着 user_iot / local-ptr，但配置从未引用它们；顺手清掉
-    rm -f /etc/mosdns/rules/geoip_cn.txt /etc/mosdns/rules/geosite_apple.txt \
-          /etc/mosdns/rules/user_iot.txt /etc/mosdns/rules/local-ptr.txt \
-          /etc/mosdns/rules/*.save /etc/mosdns/rules/*.save.*
+    rm -f /etc/mosdns/rules/*.save /etc/mosdns/rules/*.save.* /etc/mosdns/rules/*.tmp.*
+    # 只清理当前配置确实不再引用的旧文件；删掉仍被引用的文件会让 mosdns 启动失败
+    local obsolete
+    for obsolete in geoip_cn.txt geosite_apple.txt user_iot.txt local-ptr.txt; do
+        config_uses_rule "$obsolete" || rm -f "/etc/mosdns/rules/$obsolete"
+    done
     dl() {
         local target="$1"
         local source="$2"
         local tmp
         tmp=$(mktemp "${target}.tmp.XXXXXX")
         echo " - $(basename "$target")"
-        if fetch_url "$tmp" "$source"; then
+        if fetch_url "$tmp" "$source" && [ -s "$tmp" ]; then
+            chmod 0644 "$tmp"
             mv "$tmp" "$target"
         else
             rm -f "$tmp"
@@ -489,9 +497,20 @@ do_update_geo_rules() {
             return 1
         fi
     }
-    # 只下载 config.yaml 实际引用的两个列表
     dl "/etc/mosdns/rules/geosite_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt" || return 1
     dl "/etc/mosdns/rules/geosite_no_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt" || return 1
+    # 老配置还在用的列表照常更新
+    if config_uses_rule geoip_cn.txt; then
+        dl "/etc/mosdns/rules/geoip_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt" || return 1
+    fi
+    if config_uses_rule geosite_apple.txt; then
+        dl "/etc/mosdns/rules/geosite_apple.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt" || return 1
+    fi
+    # 引用了但不存在的本地规则文件补一个空的，避免 mosdns 因找不到文件起不来
+    local ref
+    for ref in $(grep -oE '/etc/mosdns/rules/[A-Za-z0-9_.-]+' "$CONFIG_FILE" 2>/dev/null | sort -u); do
+        [ -e "$ref" ] || touch "$ref"
+    done
     systemctl reset-failed mosdns 2>/dev/null
     systemctl restart mosdns || return 1
     echo -e "${GREEN}✅ 规则更新完毕！${PLAIN}"

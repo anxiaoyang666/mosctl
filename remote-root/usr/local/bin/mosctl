@@ -21,7 +21,10 @@ else
     GH_PROXY="https://gh-proxy.com/"
 fi
 CONFIG_FILE="/etc/mosdns/config.yaml"
-KERNEL_VERSION="v5.3.4"
+BACKUP_DIR="/etc/mosdns/backup"
+MOSDNS_BIN="/usr/local/bin/mosdns"
+# 仓库里默认配置模板的路径，mosctl sync 拉的就是这个文件
+TEMPLATE_REPO_PATH="remote-root/etc/mosdns/templates/default.yaml"
 LOG_FILE="/var/log/mosdns.log"
 CACHE_FILE="/etc/mosdns/cache.dump"
 IP_FORWARD_STATE="/etc/mosdns/.rescue-ip-forward"
@@ -41,6 +44,49 @@ script_version() {
     [ -n "$version" ] && echo "v$version" || echo "unknown"
 }
 SCRIPT_VER="$(script_version)"
+
+# 内核版本直接问 mosdns 本身，不再写死在脚本里
+kernel_version() {
+    local version=""
+    if [ -x "$MOSDNS_BIN" ]; then
+        version="$("$MOSDNS_BIN" version 2>/dev/null | head -n 1)"
+    fi
+    [ -n "$version" ] && echo "$version" || echo "unknown"
+}
+
+# 取 "- addr: xxx # TAG_LOCAL/TAG_REMOTE" 行里的地址；兼容双引号、单引号和不带引号
+# 用法：config_tag_value <配置文件> <TAG_LOCAL|TAG_REMOTE>
+config_tag_value() {
+    local file="$1"
+    local tag="$2"
+    local q="[\"']"
+    [ -f "$file" ] || return 0
+    grep -E "#[[:space:]]*${tag}[[:space:]]*\$" "$file" | head -n 1 \
+        | sed -nE "s/^[[:space:]]*-[[:space:]]*addr:[[:space:]]*${q}?([^\"'#]*)${q}?[[:space:]]*#.*\$/\1/p" \
+        | sed -E 's/[[:space:]]+$//'
+}
+
+# 把 GitHub 仓库地址转成分支里某个文件的 raw 地址；不是 GitHub 仓库时返回 1
+repo_raw_url() {
+    local repo="${REPO_URL%.git}"
+    repo="${repo%/}"
+    case "$repo" in
+        https://github.com/*/*) ;;
+        *) return 1 ;;
+    esac
+    local path="${repo#https://github.com/}"
+    case "$path" in
+        */*/*) return 1 ;;
+    esac
+    echo "https://raw.githubusercontent.com/${path}/${REPO_BRANCH}/$1"
+}
+
+# 粗略判断拉下来的是 YAML 而不是错误页：非空，且第一行非注释内容里有冒号
+looks_like_yaml() {
+    local first
+    first="$(grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | head -n 1)"
+    [ -n "$first" ] && [[ "$first" == *:* ]]
+}
 
 # 转义 sed 替换串里的特殊字符（分隔符 | 以及 & 和反斜杠）
 sed_escape() {
@@ -118,73 +164,88 @@ rescue_disable() {
 
     # 打印切回的具体 DNS 信息
     if [ "$1" != "silent" ] && [ -f "$CONFIG_FILE" ]; then
-        local local_dns=$(grep "# TAG_LOCAL" $CONFIG_FILE | cut -d '"' -f 2)
-        local remote_dns=$(grep "# TAG_REMOTE" $CONFIG_FILE | cut -d '"' -f 2)
-        
+        local local_dns remote_dns
+        local_dns="$(config_tag_value "$CONFIG_FILE" TAG_LOCAL)"
+        remote_dns="$(config_tag_value "$CONFIG_FILE" TAG_REMOTE)"
+
         echo -e "${GREEN}✅ 流量已切回正常上游配置：${PLAIN}"
         echo -e "   🏠 国内: ${GREEN}${local_dns}${PLAIN}"
         echo -e "   🌍 国外: ${GREEN}${remote_dns}${PLAIN}"
     fi
 }
 
+# 把旧配置里的 TTL / TAG_LOCAL / TAG_REMOTE 搬进新配置（和面板"恢复默认"的保留逻辑一致）
+# 用法：carry_over_config_values <旧配置> <新配置>
+carry_over_config_values() {
+    local old="$1"
+    local new="$2"
+    local old_ttl old_local_dns old_remote_dns
+    [ -f "$old" ] || return 0
+    old_ttl="$(grep -E '^[[:space:]]*lazy_cache_ttl:' "$old" | head -n 1 | awk '{print $2}')"
+    old_local_dns="$(config_tag_value "$old" TAG_LOCAL)"
+    old_remote_dns="$(config_tag_value "$old" TAG_REMOTE)"
+
+    if [[ "$old_ttl" =~ ^[0-9]+$ ]]; then
+        sed -i "s/lazy_cache_ttl: [0-9]*/lazy_cache_ttl: ${old_ttl}/" "$new"
+    fi
+    if [ -n "$old_local_dns" ] && ! upstream_invalid "$old_local_dns"; then
+        sed -i "s|\(.*\)- addr:.*# TAG_LOCAL|\1- addr: \"$(sed_escape "$old_local_dns")\" # TAG_LOCAL|" "$new"
+    fi
+    if [ -n "$old_remote_dns" ] && ! upstream_invalid "$old_remote_dns"; then
+        sed -i "s|\(.*\)- addr:.*# TAG_REMOTE|\1- addr: \"$(sed_escape "$old_remote_dns")\" # TAG_REMOTE|" "$new"
+    fi
+}
+
+# 从仓库拉取默认配置模板（remote-root/etc/mosdns/templates/default.yaml）覆盖本机 config.yaml，
+# 保留当前上游 DNS 与 TTL；先直连 raw.githubusercontent.com，失败再走 GH_PROXY
 sync_config() {
     if [ -z "$REPO_URL" ]; then
         echo -e "${RED}❌ 未配置 MOSCTL_REPO_URL，无法同步配置。请在 /etc/mosdns/.env 中设置你的仓库地址。${PLAIN}"
         return 1
     fi
-    echo -e "${YELLOW}☁️  正在从 GitHub 拉取最新配置...${PLAIN}"
-    TEMP_DIR=$(mktemp -d)
-    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$TEMP_DIR" >/dev/null 2>&1 \
-        || git clone --depth 1 --branch "$REPO_BRANCH" "${GH_PROXY}${REPO_URL}" "$TEMP_DIR" >/dev/null 2>&1 \
-        || true
-    
-    if [ -f "$TEMP_DIR/templates/config.yaml" ]; then
-        echo "⚙️  应用新配置..."
-        local old_ttl=""
-        local old_local_dns=""
-        local old_remote_dns=""
-
-        if [ -f "/etc/mosdns/config.yaml" ]; then
-            cp /etc/mosdns/config.yaml /etc/mosdns/config.yaml.bak
-            old_ttl=$(grep "lazy_cache_ttl:" /etc/mosdns/config.yaml | awk '{print $2}')
-            old_local_dns=$(grep "# TAG_LOCAL" /etc/mosdns/config.yaml | cut -d '"' -f 2)
-            old_remote_dns=$(grep "# TAG_REMOTE" /etc/mosdns/config.yaml | cut -d '"' -f 2)
-        fi
-        
-        mkdir -p /etc/mosdns
-        cp "$TEMP_DIR/templates/config.yaml" /etc/mosdns/config.yaml
-        rm -rf "$TEMP_DIR"
-
-        if [[ "$old_ttl" =~ ^[0-9]+$ ]]; then
-            sed -i "s/lazy_cache_ttl: [0-9]*/lazy_cache_ttl: ${old_ttl}/" /etc/mosdns/config.yaml
-        fi
-        if [ -n "$old_local_dns" ] && ! upstream_invalid "$old_local_dns"; then
-            sed -i "s|\(.*\)- addr:.*# TAG_LOCAL|\1- addr: \"$(sed_escape "$old_local_dns")\" # TAG_LOCAL|" /etc/mosdns/config.yaml
-        fi
-        if [ -n "$old_remote_dns" ] && ! upstream_invalid "$old_remote_dns"; then
-            sed -i "s|\(.*\)- addr:.*# TAG_REMOTE|\1- addr: \"$(sed_escape "$old_remote_dns")\" # TAG_REMOTE|" /etc/mosdns/config.yaml
-        fi
-
-        if systemctl list-units --full -all | grep -q "mosdns.service"; then
-            echo "🔄 重启服务..."
-            systemctl reset-failed mosdns 2>/dev/null
-            if systemctl restart mosdns; then
-                echo -e "${GREEN}✅ 同步成功！(配置已保留)${PLAIN}"
-            else
-                echo -e "${RED}❌ 启动失败！自动回滚...${PLAIN}"
-                if [ -f "/etc/mosdns/config.yaml.bak" ]; then
-                    mv /etc/mosdns/config.yaml.bak /etc/mosdns/config.yaml
-                    systemctl restart mosdns
-                fi
-            fi
-        else
-            echo -e "${GREEN}✅ 初始配置已写入。 (等待服务启动)${PLAIN}"
-        fi
-    else
-        echo -e "${RED}❌ 拉取失败，跳过同步步骤${PLAIN}"
-        rm -rf "$TEMP_DIR"
+    local source tmp backup=""
+    if ! source="$(repo_raw_url "$TEMPLATE_REPO_PATH")"; then
+        echo -e "${RED}❌ 只支持 GitHub 仓库在线同步，请检查 /etc/mosdns/.env 里的 MOSCTL_REPO_URL${PLAIN}"
         return 1
     fi
+    echo -e "${YELLOW}☁️  正在从 GitHub 拉取默认配置模板 (${REPO_BRANCH})...${PLAIN}"
+    tmp="$(mktemp)"
+    if ! fetch_url "$tmp" "$source" || ! looks_like_yaml "$tmp"; then
+        rm -f "$tmp"
+        echo -e "${RED}❌ 拉取失败，跳过同步步骤${PLAIN}"
+        return 1
+    fi
+
+    echo "⚙️  应用新配置..."
+    mkdir -p /etc/mosdns "$BACKUP_DIR"
+    if [ -f "$CONFIG_FILE" ]; then
+        # 和面板一样放进 backup/ 并用 config.<stamp>.bak 命名，面板的备份列表能看到并按保留数清理
+        backup="$BACKUP_DIR/config.$(date +%Y%m%d%H%M%S).bak"
+        cp -a "$CONFIG_FILE" "$backup"
+        carry_over_config_values "$CONFIG_FILE" "$tmp"
+    fi
+    install -m 0644 "$tmp" "$CONFIG_FILE"
+    rm -f "$tmp"
+
+    if ! systemctl list-units --full -all | grep -q "mosdns.service"; then
+        echo -e "${GREEN}✅ 初始配置已写入。 (等待服务启动)${PLAIN}"
+        return 0
+    fi
+    echo "🔄 重启服务..."
+    systemctl reset-failed mosdns 2>/dev/null
+    systemctl restart mosdns 2>/dev/null || true
+    sleep 1
+    if systemctl is-active --quiet mosdns; then
+        echo -e "${GREEN}✅ 同步成功！(已保留当前上游 DNS 与 TTL)${PLAIN}"
+        [ -n "$backup" ] && echo "   同步前配置已备份到：$backup"
+        return 0
+    fi
+    echo -e "${RED}❌ 启动失败！自动回滚...${PLAIN}"
+    if [ -n "$backup" ] && [ -f "$backup" ]; then
+        cp -a "$backup" "$CONFIG_FILE"
+        systemctl restart mosdns
+    fi
+    return 1
 }
 
 change_upstream() {
@@ -424,15 +485,17 @@ show_menu() {
     clear
     local status_raw=$(systemctl is-active mosdns 2>/dev/null)
     local status_text=""
+    local kernel_ver
+    kernel_ver="$(kernel_version)"
     if [ "$status_raw" == "active" ]; then status_text="${GREEN}🟢 运行中${PLAIN}"; else status_text="${RED}🔴 未运行${PLAIN}"; fi
 
     echo -e "${GREEN}=====================================${PLAIN}"
     echo -e "${GREEN}      MosDNS 管理面板 (${SCRIPT_VER})      ${PLAIN}"
     echo -e "${GREEN}=====================================${PLAIN}"
-    echo -e " 内核版本: ${GREEN}${KERNEL_VERSION}${PLAIN} | 状态: $status_text"
+    echo -e " 内核版本: ${GREEN}${kernel_ver}${PLAIN} | 状态: $status_text"
     echo -e "${GREEN}=====================================${PLAIN}"
     echo -e "   1. 🛠️  服务管理 (启动/停止/重启)"
-    echo -e "   2. 🔄  同步配置 (Git Pull)"
+    echo -e "   2. 🔄  同步配置 (拉取仓库默认模板，保留上游/TTL)"
     echo -e "   3. ⚙️  DNS 参数设置 (上游/缓存/TTL)"
     echo -e "   4. 📝  管理自定义规则"
     echo -e "   5. ⬇️  更新 Geo 数据"

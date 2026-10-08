@@ -36,6 +36,33 @@ Available variables:
 - `MOSDNS_VERSION`: mosdns core version, default `latest`
 - `GH_PROXY`: GitHub proxy prefix, default `https://gh-proxy.com/`
 
+## Configuration File (`/etc/mosdns/.env`)
+
+The installer writes `/etc/mosdns/.env` (mode `600`). The Web panel reads and updates it; `mosctl` only reads `MOSCTL_REPO_URL`, `MOSCTL_BRANCH` and `GH_PROXY` from it. Keys:
+
+- `WEB_SESSION_SECRET`: session signing key, generated at install and rotated whenever the panel password changes
+- `WEB_USER`: Web login username
+- `WEB_SECRET`: Web login password
+- `WEB_PORT`: Web panel port, default `7840`
+- `MOSCTL_REPO_URL`: repository used by the panel upgrade and `mosctl sync`
+- `MOSCTL_BRANCH`: branch used by the panel upgrade and `mosctl sync`, default `main`
+- `GH_PROXY`: GitHub proxy prefix tried only after a direct GitHub download fails; set it to an empty string to never use a proxy
+- `MIHOMO_CONTROLLER`: mihomo external controller address for the device traffic view, default `http://127.0.0.1:9090`
+- `MIHOMO_API_SECRET`: mihomo controller secret, leave empty if the controller has none
+- `RULE_SYNC_ENABLED`: `true` / `false`, push force-cn / force-nocn rule changes to other panels
+- `RULE_SYNC_TOKEN`: shared secret that `/api/rule-sync` checks
+- `RULE_SYNC_PEERS`: other mosctl / mihomo panel URLs, separated by `|`
+- `BACKUP_KEEP_COUNT`: number of config backups to keep (3–200), default `20`
+
+## Rule Sync
+
+When rule sync is enabled, saving the force-cn / force-nocn rules pushes them to every URL in `RULE_SYNC_PEERS`. Peers default to plain `http://`, and the sync token travels in a request header in clear text, so only use rule sync on a trusted LAN or put the panels behind HTTPS. The panel shows the same warning (同步密钥会以明文发送，建议仅在可信内网使用) whenever a peer is not `https://`.
+
+## System Changes
+
+- `net.ipv4.ip_forward` is no longer enabled permanently. Rescue mode (`mosctl rescue enable`) turns it on temporarily and `mosctl rescue disable` restores the previous value.
+- `mosctl sync` (menu item 2) fetches `remote-root/etc/mosdns/templates/default.yaml` from the configured repository and branch, keeps the current upstream DNS and TTL, backs up the old config as `/etc/mosdns/backup/config.<timestamp>.bak`, and rolls back if mosdns fails to start.
+
 ## Common Commands
 
 ```bash

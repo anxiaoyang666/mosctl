@@ -23,12 +23,17 @@ def index_source():
 
 class PanelUpgradeContractTest(unittest.TestCase):
     def test_panel_upgrade_excludes_local_state(self):
+        # 升级只覆盖 panel_managed_targets() 列出的文件；.env、config.yaml、rules 不能出现在里面
         text = app_source()
+        match = re.search(r"(?ms)^def panel_managed_targets\(\):\n(.*?)(?=^def )", text)
 
-        self.assertIn("PANEL_UPGRADE_EXCLUDES", text)
-        self.assertIn(".env", text)
-        self.assertIn("config.yaml", text)
-        self.assertIn("/etc/mosdns/rules", text)
+        self.assertIsNotNone(match)
+        body = match.group(1)
+        for managed in ("MANAGER_DIR", "MOSCTL", "DEFAULT_TEMPLATE_FILE"):
+            self.assertIn(managed, body)
+        for local_state in ("ENV_FILE", "CONFIG_FILE", ".env", "config.yaml", "rules"):
+            self.assertNotIn(local_state, body)
+        self.assertNotIn("PANEL_UPGRADE_EXCLUDES", text)
 
     def test_panel_upgrade_endpoint_exists(self):
         text = app_source()

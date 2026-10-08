@@ -179,6 +179,50 @@ class AppLogicTest(unittest.TestCase):
         self.assertIn("config.20261008100005.bak", remaining)
         self.assertNotIn("config.20261008100000.bak", remaining)
 
+    def test_legacy_rule_backups_are_renamed_on_cleanup(self):
+        backup_dir = Path(self.app.BACKUP_DIR)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        legacy = {
+            "force-cn.txt.20261008090000.bak": "rule-force-cn.20261008090000.bak",
+            "force-nocn.txt.20261008090001.bak": "rule-force-nocn.20261008090001.bak",
+            "hosts.txt.20261008090002.bak": "rule-hosts.20261008090002.bak",
+        }
+        untouched = [
+            "user_iot.txt.20261008090003.bak",  # 不在 RULE_FILES 里
+            "config.yaml.20261008090004.bak",  # 配置备份，不是规则
+            "hosts.txt.20261008090005.bak",  # 目标已存在，保留原文件
+        ]
+        for name in list(legacy) + untouched:
+            (backup_dir / name).write_text(name, encoding="utf-8")
+        (backup_dir / "rule-hosts.20261008090005.bak").write_text("existing", encoding="utf-8")
+
+        self.app.cleanup_old_backups(keep_count=10)
+        remaining = {path.name for path in backup_dir.iterdir()}
+
+        for old_name, new_name in legacy.items():
+            self.assertNotIn(old_name, remaining)
+            self.assertIn(new_name, remaining)
+            self.assertEqual((backup_dir / new_name).read_text(encoding="utf-8"), old_name)
+        for name in untouched:
+            self.assertIn(name, remaining)
+        self.assertEqual((backup_dir / "rule-hosts.20261008090005.bak").read_text(encoding="utf-8"), "existing")
+        groups = self.app.rule_backup_candidates()
+        self.assertEqual(sorted(groups), ["rule-force-cn", "rule-force-nocn", "rule-hosts"])
+        # 第二次运行没有东西可改名
+        self.assertEqual(self.app.migrate_legacy_rule_backups(), [])
+
+    def test_panel_managed_targets_exclude_local_state(self):
+        targets = [target for target, _, _, _ in self.app.panel_managed_targets()]
+        self.assertIn(self.app.MANAGER_DIR, targets)
+        self.assertIn(self.app.DEFAULT_TEMPLATE_FILE, targets)
+        for local_state in (self.app.ENV_FILE, self.app.CONFIG_FILE, f"{self.app.MOSDNS_DIR}/rules"):
+            self.assertNotIn(local_state, targets)
+
+    def test_session_lifetime_is_30_days(self):
+        from datetime import timedelta
+
+        self.assertEqual(self.app.app.permanent_session_lifetime, timedelta(days=30))
+
     def test_backup_file_returns_path_with_prefix(self):
         target = Path(self.tmp.name) / "config.yaml"
         target.write_text("a: 1\n", encoding="utf-8")

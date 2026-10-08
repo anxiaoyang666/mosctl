@@ -23,6 +23,28 @@ class MosctlReadmeContractTest(unittest.TestCase):
             text,
         )
 
+    def test_both_readmes_document_every_env_key(self):
+        keys = (
+            "WEB_SESSION_SECRET",
+            "WEB_USER",
+            "WEB_SECRET",
+            "WEB_PORT",
+            "MOSCTL_REPO_URL",
+            "MOSCTL_BRANCH",
+            "GH_PROXY",
+            "MIHOMO_CONTROLLER",
+            "MIHOMO_API_SECRET",
+            "RULE_SYNC_ENABLED",
+            "RULE_SYNC_TOKEN",
+            "RULE_SYNC_PEERS",
+            "BACKUP_KEEP_COUNT",
+        )
+        for path in (README, README_ZH):
+            text = path.read_text(encoding="utf-8")
+            for key in keys:
+                self.assertRegex(text, rf"(?m)^- `{key}`[:：]", f"{path.name} lacks {key}")
+            self.assertIn("ip_forward", text)
+
     def test_chinese_readme_exists(self):
         text = README_ZH.read_text(encoding="utf-8")
 

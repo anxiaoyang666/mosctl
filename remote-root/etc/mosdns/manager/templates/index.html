@@ -1203,7 +1203,8 @@
               <button type="button" onclick="copySyncToken()">复制</button>
             </div>
             <label for="syncPeers" style="margin-top: 12px;">其他 mosctl / mihomo 面板地址，每行一个</label>
-            <textarea class="compact-textarea" id="syncPeers"></textarea>
+            <textarea class="compact-textarea" id="syncPeers" oninput="updateSyncPeersWarning()"></textarea>
+            <p class="hint warn" id="syncPeersWarning" hidden>同步密钥会以明文发送，建议仅在可信内网使用（有节点使用 http:// 地址）</p>
             <div class="actions" style="margin-top: 10px;">
               <button type="button" class="primary" onclick="saveSyncSettings()">保存同步</button>
               <button type="button" onclick="testSyncPeers()">测试连通</button>
@@ -1778,7 +1779,16 @@
       $('syncEnabled').checked = Boolean(res.enabled);
       $('syncToken').value = res.token || '';
       $('syncPeers').value = res.peers_text || '';
+      updateSyncPeersWarning();
       renderSyncTestResults([]);
+    }
+
+    function updateSyncPeersWarning() {
+      const warning = $('syncPeersWarning');
+      if (!warning) return;
+      // 和后端 parse_peers 一致：没写协议的地址按 http:// 处理，同样是明文
+      const peers = ($('syncPeers').value || '').split(/[\n,|]+/).map(item => item.trim()).filter(Boolean);
+      warning.hidden = !peers.some(peer => !/^https:\/\//i.test(peer));
     }
 
     function generateSyncToken() {

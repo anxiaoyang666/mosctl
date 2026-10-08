@@ -37,7 +37,7 @@ DEFAULT_BACKUP_KEEP_COUNT = 20
 KERNEL_BACKUP_KEEP_COUNT = 3
 # 备份文件按前缀分三类，互不混在同一个列表或保留数里：
 #   config.<stamp>.bak            配置备份（旧版叫 config.yaml.<stamp>.bak，仍可识别）
-#   rule-<id>.<stamp>.bak         规则文件备份（旧版叫 <file>.txt.<stamp>.bak，不再列出）
+#   rule-<id>.<stamp>.bak         规则文件备份（旧版叫 <file>.txt.<stamp>.bak，启动/清理时自动改名）
 #   mosdns-bin.<stamp>            内核备份（旧版叫 mosdns-bin.<stamp>.bak，仍可识别）
 CONFIG_BACKUP_PREFIX = "config."
 RULE_BACKUP_PREFIX = "rule-"
@@ -53,9 +53,10 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.27"
-PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
+PANEL_VERSION = "0.3.28"
 PANEL_BACKUP_KEEP_COUNT = 3
+# 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
+SESSION_LIFETIME_DAYS = 30
 # 设备页只展示每台设备最常查询的前 N 个域名；归因时仍使用全部域名
 DEVICE_DOMAIN_DISPLAY_LIMIT = 12
 # 下载上限：内核 zip 约 5 MB、面板源码 zip 约 2 MB，100 MB 足够且能挡住异常响应
@@ -114,7 +115,7 @@ RULE_FILES = {
 
 
 app = Flask(__name__)
-app.permanent_session_lifetime = timedelta(days=365)
+app.permanent_session_lifetime = timedelta(days=SESSION_LIFETIME_DAYS)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -304,12 +305,6 @@ def write_device_note(device_ip, note):
         notes.pop(ip, None)
     write_json_file(DEVICE_NOTES_FILE, notes)
     return True, "备注已保存"
-
-
-def config_value(key):
-    text = read_config_text()
-    match = re.search(rf"(?m)^\s*{re.escape(key)}:\s*['\"]?([^'\"\n#]+)['\"]?\s*$", text)
-    return match.group(1).strip() if match else ""
 
 
 def localize_wildcard_host(url):
@@ -1796,31 +1791,6 @@ def upgrade_mosdns_core():
         return False, "新内核启动失败，已回滚旧内核：\n" + restart_message
 
 
-def safe_sync_config():
-    if not os.path.exists(CONFIG_FILE):
-        return False, "当前配置文件不存在，已取消同步"
-
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    stamp = time.strftime("%Y%m%d%H%M%S")
-    safe_backup = f"{BACKUP_DIR}/{CONFIG_BACKUP_PREFIX}pre-web-sync.{stamp}.yaml"
-    shutil.copy2(CONFIG_FILE, safe_backup)
-    cleanup_old_backups()
-
-    ok, output = run_cmd([MOSCTL, "sync"], timeout=180)
-    time.sleep(1)
-    if service_active():
-        return ok, output or "同步完成，mosdns 正在运行"
-
-    shutil.copy2(safe_backup, CONFIG_FILE)
-    restart_ok, restart_output = restart_mosdns()
-    message = (
-        "同步后的配置导致 mosdns 启动失败，已自动恢复同步前配置。\n\n"
-        f"同步输出：\n{output}\n\n"
-        f"恢复结果：\n{restart_output}"
-    )
-    return False, message if restart_ok else message + "\n\n恢复后重启仍失败，请手动检查。"
-
-
 def backup_file(path, prefix):
     # 返回备份文件路径，不存在原文件时返回 None（调用方据此决定如何回滚）
     if not os.path.exists(path):
@@ -2228,9 +2198,41 @@ def write_backup_settings(data):
     return True, "备份保留策略已保存"
 
 
+LEGACY_RULE_BACKUP_RE = re.compile(r"^(?P<base>[^/]+\.txt)\.(?P<stamp>[0-9]+)\.bak$")
+
+
+def migrate_legacy_rule_backups():
+    # 旧版规则备份叫 <file>.txt.<stamp>.bak（例如 force-cn.txt.20261008090000.bak），
+    # 新版只列出并清理 rule-<id>.<stamp>.bak；这里一次性改名，让旧备份也能被看到和按保留数清理。
+    # 只处理 RULE_FILES 里已知的文件名，目标已存在则保留原文件不动。
+    renamed = []
+    if not os.path.isdir(BACKUP_DIR):
+        return renamed
+    rule_id_by_basename = {os.path.basename(meta["path"]): rule_id for rule_id, meta in RULE_FILES.items()}
+    for name in sorted(os.listdir(BACKUP_DIR)):
+        match = LEGACY_RULE_BACKUP_RE.match(name)
+        if not match:
+            continue
+        rule_id = rule_id_by_basename.get(match.group("base"))
+        if not rule_id:
+            continue
+        source = os.path.join(BACKUP_DIR, name)
+        target_name = f"{rule_backup_prefix(rule_id)}.{match.group('stamp')}.bak"
+        target = os.path.join(BACKUP_DIR, target_name)
+        if not os.path.isfile(source) or os.path.exists(target):
+            continue
+        try:
+            os.replace(source, target)
+            renamed.append((name, target_name))
+        except OSError:
+            pass
+    return renamed
+
+
 def cleanup_old_backups(keep_count=None):
     # 配置备份按 keep_count 保留；内核备份固定保留 KERNEL_BACKUP_KEEP_COUNT 个；
     # 规则备份每个规则各自保留 keep_count 个，三者互不占用名额
+    migrate_legacy_rule_backups()
     keep_count = backup_keep_count() if keep_count is None else int(keep_count)
     stale_items = backup_candidates()[keep_count:] + kernel_backup_candidates()[KERNEL_BACKUP_KEEP_COUNT:]
     for items in rule_backup_candidates().values():
@@ -2248,6 +2250,13 @@ def cleanup_old_backups(keep_count=None):
         "remaining_count": len(backup_candidates()),
         "keep_count": keep_count,
     }
+
+
+# 启动时顺手把旧命名的规则备份改成新命名；失败不影响面板启动
+try:
+    migrate_legacy_rule_backups()
+except Exception:
+    pass
 
 
 def save_rule_content(rule_id, content):

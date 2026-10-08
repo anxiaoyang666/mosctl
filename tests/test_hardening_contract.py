@@ -128,7 +128,64 @@ class HardeningContractTest(unittest.TestCase):
         text = read(APP)
         match = re.search(r'(?m)^PANEL_VERSION = "(\d+)\.(\d+)\.(\d+)"$', text)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 3, 27))
+        self.assertGreaterEqual(tuple(int(part) for part in match.groups()), (0, 3, 28))
+
+    # --- v0.3.28：低优先级收尾 ---
+
+    def test_dead_code_removed_and_session_shortened(self):
+        text = read(APP)
+
+        for name in ("PANEL_UPGRADE_EXCLUDES", "def config_value", "def safe_sync_config", "pre-web-sync"):
+            self.assertNotIn(name, text)
+        self.assertIn("SESSION_LIFETIME_DAYS = 30", text)
+        self.assertIn("timedelta(days=SESSION_LIFETIME_DAYS)", text)
+        self.assertNotIn("days=365", text)
+        self.assertNotRegex(text, r"(?m)^\s*except\s*:")
+
+    def test_legacy_rule_backups_are_migrated(self):
+        text = read(APP)
+
+        self.assertIn("def migrate_legacy_rule_backups", text)
+        self.assertRegex(text, r"def cleanup_old_backups\(keep_count=None\):\n(?:\s*#[^\n]*\n)*\s*migrate_legacy_rule_backups\(\)")
+
+    def test_plain_http_sync_peers_show_warning(self):
+        index = read(INDEX)
+        readme = read(ROOT / "README.md")
+        readme_zh = read(ROOT / "README.zh-CN.md")
+
+        self.assertIn('id="syncPeersWarning"', index)
+        self.assertIn("同步密钥会以明文发送，建议仅在可信内网使用", index)
+        self.assertIn("function updateSyncPeersWarning", index)
+        self.assertIn('oninput="updateSyncPeersWarning()"', index)
+        self.assertIn("## Rule Sync", readme)
+        self.assertIn("clear text", readme)
+        self.assertIn("## 规则同步", readme_zh)
+        self.assertIn("同步密钥会以明文发送，建议仅在可信内网使用", readme_zh)
+
+    def test_cli_sync_fetches_default_template_and_reads_kernel_version(self):
+        cli = read(MOSCTL)
+
+        self.assertNotIn("KERNEL_VERSION", cli)
+        self.assertIn("kernel_version() {", cli)
+        self.assertIn('"$MOSDNS_BIN" version', cli)
+        self.assertIn('TEMPLATE_REPO_PATH="remote-root/etc/mosdns/templates/default.yaml"', cli)
+        self.assertIn("repo_raw_url() {", cli)
+        self.assertIn("looks_like_yaml() {", cli)
+        self.assertIn("carry_over_config_values() {", cli)
+        self.assertIn('fetch_url "$tmp" "$source"', cli)
+        self.assertIn('backup="$BACKUP_DIR/config.$(date +%Y%m%d%H%M%S).bak"', cli)
+        self.assertIn("systemctl is-active --quiet mosdns", cli)
+        self.assertNotIn("templates/config.yaml", cli)
+        self.assertNotIn("git clone", cli)
+        self.assertNotIn("config.yaml.bak", cli)
+        # TAG_LOCAL/TAG_REMOTE 不再按双引号切，兼容单引号和无引号
+        self.assertIn("config_tag_value() {", cli)
+        self.assertNotIn("cut -d '\"' -f 2", cli)
+
+    def test_stale_repo_files_removed(self):
+        self.assertFalse((ROOT / "remote-root" / "etc" / "mosdns" / "config.yaml").exists())
+        self.assertFalse((ROOT / "INVENTORY.txt").exists())
+        self.assertTrue((ROOT / "remote-root" / "etc" / "mosdns" / "templates" / "default.yaml").exists())
 
 
 if __name__ == "__main__":

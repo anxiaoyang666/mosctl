@@ -552,3 +552,21 @@ class CronLoggingMigrationTest(unittest.TestCase):
         finally:
             self.app.subprocess.run = real_run
 
+
+
+class SelfPeerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = load_app(self.tmp.name)
+        self.app.local_ipv4_addresses = lambda: {"127.0.0.1", "localhost", "10.10.10.9"}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_self_peer_detected_by_ip_and_port(self):
+        f = self.app.is_self_peer
+        self.assertTrue(f("http://10.10.10.9:7840", "7840"))
+        self.assertTrue(f("http://127.0.0.1:7840", 7840))
+        self.assertFalse(f("http://10.10.10.9:7838", "7840"), "同机不同端口（另一个面板）不是自己")
+        self.assertFalse(f("http://10.10.20.7:7840", "7840"))
+        self.assertFalse(f("not a url", "7840"))

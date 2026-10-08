@@ -54,7 +54,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.34"
+PANEL_VERSION = "0.3.35"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -1666,7 +1666,11 @@ def test_sync_peers(data):
         "X-Mosdns-Sync-Token": token,
     }
     results = []
+    own_port = read_env().get("WEB_PORT", "7840")
     for peer in peers:
+        if is_self_peer(peer, own_port):
+            results.append({"peer": peer, "success": True, "message": "本机（跳过）"})
+            continue
         url = peer.rstrip("/") + "/api/rule-sync"
         try:
             req = urlrequest.Request(url, data=payload, headers=headers, method="POST")
@@ -2099,6 +2103,30 @@ def save_rule_content(rule_id, content):
     return True, "规则已保存", (backup, path)
 
 
+
+def local_ipv4_addresses():
+    """本机所有 IPv4 地址（含回环），用来识别同步节点里的“自己”。"""
+    addrs = {"127.0.0.1", "localhost"}
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=5).stdout
+        addrs.update(re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/", out))
+    except Exception:
+        pass
+    return addrs
+
+def is_self_peer(peer, own_port):
+    """同步节点列表在各处是同一份，会包含本机。推送给自己会撞上本机正持有的锁（409），只会显示成失败。"""
+    try:
+        parts = urlsplit(peer)
+        host, port = parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False
+    try:
+        own_port = int(own_port)
+    except (TypeError, ValueError):
+        return False
+    return port == own_port and host in local_ipv4_addresses()
+
 def broadcast_rule(rule_id, content):
     if rule_id not in SYNCABLE_RULE_IDS:
         return ""
@@ -2122,7 +2150,11 @@ def broadcast_rule(rule_id, content):
         "Content-Type": "application/json",
         "X-Mosdns-Sync-Token": settings["token"],
     }
+    own_port = read_env().get("WEB_PORT", "7840")
     for peer in settings["peers"]:
+        if is_self_peer(peer, own_port):
+            results.append(f"{peer}: 本机（跳过）")
+            continue
         url = peer.rstrip("/") + "/api/rule-sync"
         try:
             req = urlrequest.Request(url, data=payload, headers=headers, method="POST")

@@ -478,6 +478,7 @@
     .soft-danger { color: #991b1b; background: var(--red-soft); border-color: #ffc9c9; }
     .ok { color: var(--green); }
     .warn { color: var(--amber); }
+    .panel.migrate-card { border-color: #fde68a; background: var(--amber-soft); }
     .bad { color: var(--red); }
     label {
       display: block;
@@ -511,7 +512,7 @@
     }
     .field-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
     }
     .field {
@@ -930,6 +931,16 @@
 
 
       <section class="view" id="view-policy">
+        <section class="panel migrate-card" id="migrateCard" hidden>
+          <div class="panel-head">
+            <div>
+              <h3>配置结构可升级</h3>
+              <div class="panel-note" id="migrateNote">当前配置结构是 v{n}（模板最新 v{m}）。迁移会用新模板重建配置，并保留国内/国外/备用上游和缓存 TTL；会先在沙盒里校验，失败则不做任何修改。</div>
+            </div>
+            <button type="button" class="primary" onclick="confirmMigrateTemplate()">迁移到最新模板</button>
+          </div>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <div>
@@ -943,6 +954,11 @@
               <div class="field-title">国内上游</div>
               <label for="local_dns">优先走国内解析的上游 DNS</label>
               <input id="local_dns" placeholder="223.5.5.5">
+            </div>
+            <div class="field">
+              <div class="field-title">备用国内 DNS</div>
+              <label for="local_dns_backup">可选，与国内上游并发查询，取先返回的结果；留空则删除</label>
+              <input id="local_dns_backup" placeholder="223.5.5.5">
             </div>
             <div class="field">
               <div class="field-title">国外上游</div>
@@ -1420,7 +1436,8 @@
       $('webPort').textContent = res.web_port || '--';
       $('versionLabel').textContent = 'v' + (res.panel_version || '--');
       panelCurrentVersion = res.panel_version || panelCurrentVersion;
-      $('flowLocal').textContent = '国内：' + (res.local_dns || '--');
+      renderMigrateCard(res);
+      $('flowLocal').textContent = '国内：' + (res.local_dns || '--') + (res.local_dns_backup ? ' / ' + res.local_dns_backup : '');
       $('flowRemote').textContent = '国外：' + (res.remote_dns || '--');
       $('ttlPill').textContent = 'TTL ' + (res.ttl || '--');
       if ($('geoServerTime')) {
@@ -1465,6 +1482,37 @@
           $('coreVersionHint').textContent = res.message || '获取最新版本失败';
           toast('检测失败', res.message || '');
         }
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderMigrateCard(res) {
+      const outdated = Boolean(res && res.config_outdated);
+      $('migrateCard').hidden = !outdated;
+      if (outdated) {
+        $('migrateNote').textContent = '当前配置结构是 v' + (res.config_template_version || 0) + '（模板最新 v' + (res.latest_template_version || 0) + '）。迁移会用新模板重建配置，并保留国内/国外/备用上游和缓存 TTL；会先在沙盒里校验，失败则不做任何修改。';
+      }
+    }
+
+    async function confirmMigrateTemplate() {
+      if (busy) return;
+      if (!confirm('迁移会用最新内置模板重建 config.yaml（旧配置会先备份），保留国内/国外/备用上游和缓存 TTL。确定继续吗？')) return;
+      setBusy(true, '正在迁移到最新模板...');
+      try {
+        const res = await api('/api/config/migrate', {method: 'POST'});
+        const carried = res.carried || {};
+        const lines = [];
+        if (res.sandbox_ok) {
+          lines.push('国内：' + (carried.local || '模板默认'));
+          lines.push('备用国内：' + (carried.local_backup || '模板默认'));
+          lines.push('国外：' + (carried.remote || '模板默认'));
+          lines.push('TTL：' + (carried.ttl || '--'));
+        }
+        if (res.message) lines.push(res.message);
+        toast(res.success ? '迁移完成' : '迁移失败', lines.join('\n'));
+        await loadStatus();
+        await loadSettings();
       } finally {
         setBusy(false);
       }
@@ -1597,6 +1645,7 @@
     async function loadSettings() {
       const res = await api('/api/settings');
       $('local_dns').value = res.local_dns || '';
+      $('local_dns_backup').value = res.local_dns_backup || '';
       $('remote_dns').value = res.remote_dns || '';
       $('ttl').value = res.ttl || '';
     }
@@ -1614,6 +1663,7 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             local_dns: $('local_dns').value,
+            local_dns_backup: $('local_dns_backup').value,
             remote_dns: $('remote_dns').value,
             ttl: $('ttl').value
           })

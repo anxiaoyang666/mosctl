@@ -442,6 +442,8 @@ class AppLogicTest(unittest.TestCase):
         def missing_run(args, **kwargs):
             raise FileNotFoundError("crontab")
 
+        # self.app.subprocess 就是全局 subprocess 模块，必须先存原函数，否则会污染后面的测试
+        original_run = self.app.subprocess.run
         self.app.subprocess.run = missing_run
         try:
             self.assertEqual(self.app.read_crontab_state(), ([], False))
@@ -458,7 +460,7 @@ class AppLogicTest(unittest.TestCase):
             self.assertIsNone(status["last_run"])
             self.assertEqual([item["name"] for item in status["files"]], ["geosite_cn.txt", "geosite_no_cn.txt"])
         finally:
-            self.app.subprocess.run = __import__("subprocess").run
+            self.app.subprocess.run = original_run
 
     def test_parse_geo_update_log_reads_last_block(self):
         log = "\n".join(

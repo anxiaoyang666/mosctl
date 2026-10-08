@@ -54,7 +54,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.33"
+PANEL_VERSION = "0.3.34"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -479,23 +479,158 @@ def read_config_text():
         return file.read()
 
 
+# 模板结构版本：templates/default.yaml 第一行的 "# mosctl-template: N"。
+# config.yaml 只在安装时从模板复制，面板升级不会动它；没有标记的旧配置按 v0 处理
+TEMPLATE_VERSION_RE = re.compile(r"^\s*#\s*mosctl-template\s*:\s*(\d+)\s*$")
+
+
+def template_version(text):
+    # 只看前 5 行，容忍多余空白；找不到标记返回 0
+    for line in str(text or "").splitlines()[:5]:
+        match = TEMPLATE_VERSION_RE.match(line)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
+def template_version_info():
+    latest = 0
+    if os.path.exists(DEFAULT_TEMPLATE_FILE):
+        with open(DEFAULT_TEMPLATE_FILE, "r", encoding="utf-8") as file:
+            latest = template_version(file.read())
+    current = template_version(read_config_text())
+    return {
+        "config_template_version": current,
+        "latest_template_version": latest,
+        "config_outdated": current < latest,
+    }
+
+
+def tag_addr_pattern(tag):
+    # "- addr: xxx # <TAG>" 行；TAG 后面只允许空白到行尾，
+    # 所以 TAG_LOCAL 不会误中 TAG_LOCAL_BACKUP。group(1)=前缀，group(2)=" # TAG" 尾巴
+    return re.compile(r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*' + re.escape(tag) + r'\s*)$')
+
+
+def tag_addr_value(text, tag):
+    match = re.search(r'(?m)^\s*-\s*addr:\s*["\']?([^"\'#\n]+)["\']?\s*#\s*' + re.escape(tag) + r'\s*$', text or "")
+    return match.group(1).strip() if match else ""
+
+
+def replace_tag_addr(text, tag, value):
+    # 返回 (新文本, 替换次数)
+    return tag_addr_pattern(tag).subn(quoted_replacer(value.strip()), text, count=1)
+
+
 def parse_config_values():
     text = read_config_text()
 
     ttl_match = re.search(r"(?m)^\s*lazy_cache_ttl:\s*(\d+)\s*$", text)
-    local_match = re.search(r'(?m)^(\s*-\s*addr:\s*)["\']?([^"\'#\n]+)["\']?\s*#\s*TAG_LOCAL\s*$', text)
-    remote_match = re.search(r'(?m)^(\s*-\s*addr:\s*)["\']?([^"\'#\n]+)["\']?\s*#\s*TAG_REMOTE\s*$', text)
-
-    local_raw = local_match.group(2).strip() if local_match else ""
-    remote_raw = remote_match.group(2).strip() if remote_match else ""
+    local_raw = tag_addr_value(text, "TAG_LOCAL")
+    backup_raw = tag_addr_value(text, "TAG_LOCAL_BACKUP")
+    remote_raw = tag_addr_value(text, "TAG_REMOTE")
 
     return {
         "ttl": ttl_match.group(1) if ttl_match else "",
         "local_dns": display_upstream(local_raw, "udp"),
+        "local_dns_backup": display_upstream(backup_raw, "udp"),
         "remote_dns": display_upstream(remote_raw, None),
         "local_dns_raw": local_raw,
+        "local_dns_backup_raw": backup_raw,
         "remote_dns_raw": remote_raw,
     }
+
+
+def line_indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def item_end(lines, start):
+    # start 是 "- addr:" 行；返回这个列表项结束后的下一行下标（缩进更深的续行都算本项）
+    dash_indent = line_indent(lines[start])
+    end = start + 1
+    while end < len(lines) and lines[end].strip() and line_indent(lines[end]) > dash_indent:
+        end += 1
+    return end
+
+
+def set_local_backup(text, backup):
+    """在 TAG_LOCAL 所在的 forward 插件里写入/删除 TAG_LOCAL_BACKUP 备用上游，返回 (新文本, 错误)。
+
+    backup 为空：删掉备用行；该插件的 concurrent 大于剩余上游数时降到剩余上游数
+    （mosdns 不会报错，但会按 us[(r+i)%len(us)] 轮转，对同一个上游重复发查询）。
+    backup 非空：有备用行就替换地址；没有（旧配置）就插到 TAG_LOCAL 这一项之后，
+    缩进相同，并保证该插件 args 里有 concurrent: 2。
+    """
+    lines = text.splitlines(keepends=True)
+    local_pattern = tag_addr_pattern("TAG_LOCAL")
+    backup_pattern = tag_addr_pattern("TAG_LOCAL_BACKUP")
+    local_idx = next((i for i, line in enumerate(lines) if local_pattern.match(line.rstrip("\n"))), None)
+    if local_idx is None:
+        return text, "没有找到 TAG_LOCAL"
+    dash_indent = line_indent(lines[local_idx])
+
+    # 往上找 upstreams: 键，它的缩进就是 args 下各字段的缩进
+    upstreams_idx = None
+    for i in range(local_idx - 1, -1, -1):
+        if not lines[i].strip():
+            continue
+        if line_indent(lines[i]) < dash_indent and re.match(r"^\s*upstreams:\s*$", lines[i]):
+            upstreams_idx = i
+            break
+        if line_indent(lines[i]) < dash_indent:
+            break
+    if upstreams_idx is None:
+        return text, "没有找到 TAG_LOCAL 所在的 upstreams"
+    args_indent = line_indent(lines[upstreams_idx])
+
+    def args_range():
+        # 返回 (起, 止)：插件 args 下缩进 >= args_indent 的连续区域
+        start = upstreams_idx
+        while start - 1 >= 0 and (not lines[start - 1].strip() or line_indent(lines[start - 1]) >= args_indent):
+            start -= 1
+        end = upstreams_idx + 1
+        while end < len(lines) and (not lines[end].strip() or line_indent(lines[end]) >= args_indent):
+            end += 1
+        return start, end
+
+    def find_backup():
+        start, end = args_range()
+        return next((i for i in range(start, end) if backup_pattern.match(lines[i].rstrip("\n"))), None)
+
+    def set_concurrent(value, raise_only=False, lower_only=False, insert=True):
+        # raise_only：已有值 >= value 就不动；lower_only：已有值 <= value 就不动
+        start, end = args_range()
+        for i in range(start, end):
+            match = re.match(r"^(\s*concurrent:\s*)(\d+)(\s*)$", lines[i].rstrip("\n"))
+            if match and line_indent(lines[i]) == args_indent:
+                current = int(match.group(2))
+                if (raise_only and current >= value) or (lower_only and current <= value):
+                    return
+                lines[i] = f"{match.group(1)}{value}{match.group(3)}\n"
+                return
+        if insert:
+            lines.insert(upstreams_idx, " " * args_indent + f"concurrent: {value}\n")
+
+    backup_idx = find_backup()
+    if not str(backup or "").strip():
+        if backup_idx is None:
+            return text, None
+        del lines[backup_idx:item_end(lines, backup_idx)]
+        start, end = args_range()
+        remaining = sum(1 for i in range(start, end) if re.match(r"^\s*-\s*addr:", lines[i]))
+        set_concurrent(max(1, remaining), lower_only=True, insert=False)
+        return "".join(lines), None
+
+    if backup_idx is not None:
+        lines[backup_idx] = backup_pattern.sub(quoted_replacer(backup.strip()), lines[backup_idx].rstrip("\n"), count=1) + "\n"
+    else:
+        if not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        insert_at = item_end(lines, local_idx)
+        lines.insert(insert_at, " " * dash_indent + f'- addr: "{backup.strip()}" # TAG_LOCAL_BACKUP\n')
+    set_concurrent(2, raise_only=True)
+    return "".join(lines), None
 
 
 def display_upstream(value, default_scheme=None):
@@ -759,40 +894,57 @@ def restart_or_rollback(rollbacks, success_message, failure_prefix):
 
 
 def restore_default_template():
+    ok, message, _details = restore_default_template_details()
+    return ok, message
+
+
+def migrate_to_current_template():
+    """把旧模板站点迁到当前内置模板（不挂路由，供 python 直接调用）。
+
+    等同 restore_default_template()，但返回 dict：carried 是带过去的
+    local / local_backup / remote / ttl（local_backup 为空表示旧配置没有，用模板默认值），
+    sandbox_ok 表示沙箱校验是否通过；校验不通过时什么都不改。
+    """
+    ok, message, details = restore_default_template_details()
+    return {"success": ok, "message": message, **details}
+
+
+def restore_default_template_details():
+    details = {"sandbox_ok": False, "carried": {}}
     if not os.path.exists(DEFAULT_TEMPLATE_FILE):
-        return False, "内置默认模板不存在"
+        return False, "内置默认模板不存在", details
 
     current = parse_config_values()
     with open(DEFAULT_TEMPLATE_FILE, "r", encoding="utf-8") as file:
         content = file.read()
 
     local_dns = current.get("local_dns_raw") or normalize_upstream(current.get("local_dns", ""), default_scheme="udp")[0]
+    local_backup = current.get("local_dns_backup_raw", "")
     remote_dns = current.get("remote_dns_raw") or normalize_upstream(current.get("remote_dns", ""), default_port=53)[0]
     ttl = current.get("ttl") or "86400"
     if not re.fullmatch(r"\d{1,7}", ttl):
         ttl = "86400"
 
     # 当前配置里解析出的上游如果含非法字符，就保留模板默认值而不是拼进去
+    carried = {"local": "", "local_backup": "", "remote": "", "ttl": ttl}
     if local_dns.strip() and not upstream_value_error(local_dns):
-        content = re.sub(
-            r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_LOCAL\s*)$',
-            quoted_replacer(local_dns.strip()),
-            content,
-            count=1,
-        )
+        content = replace_tag_addr(content, "TAG_LOCAL", local_dns)[0]
+        carried["local"] = local_dns.strip()
+    # 旧配置没有备用行时保留模板默认的备用上游
+    if local_backup.strip() and not upstream_value_error(local_backup):
+        content = replace_tag_addr(content, "TAG_LOCAL_BACKUP", local_backup)[0]
+        carried["local_backup"] = local_backup.strip()
     if remote_dns.strip() and not upstream_value_error(remote_dns):
-        content = re.sub(
-            r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_REMOTE\s*)$',
-            quoted_replacer(remote_dns.strip()),
-            content,
-            count=1,
-        )
+        content = replace_tag_addr(content, "TAG_REMOTE", remote_dns)[0]
+        carried["remote"] = remote_dns.strip()
     content = re.sub(
         r"(?m)^(\s*lazy_cache_ttl:\s*)\d+\s*$",
         lambda match: match.group(1) + ttl,
         content,
         count=1,
     )
+
+    details["carried"] = carried
 
     tmp_file = f"{CONFIG_FILE}.defaultcheck"
     with open(tmp_file, "w", encoding="utf-8") as file:
@@ -803,15 +955,17 @@ def restore_default_template():
             os.remove(tmp_file)
         except OSError:
             pass
-        return False, "内置默认模板校验失败，未替换当前配置：\n" + message
+        return False, "内置默认模板校验失败，未替换当前配置：\n" + message, details
+    details["sandbox_ok"] = True
 
     backup = backup_file(CONFIG_FILE, "config")
     os.replace(tmp_file, CONFIG_FILE)
-    return restart_or_rollback(
+    ok, message = restart_or_rollback(
         [(backup, CONFIG_FILE)],
-        "已恢复内置默认配置，并保留当前上游 DNS 与 TTL。",
+        "已恢复内置默认配置，并保留当前上游 DNS（含备用国内 DNS）与 TTL。",
         "默认配置已写入",
     )
+    return ok, message, details
 
 
 def mosdns_asset_name():
@@ -2003,17 +2157,22 @@ def apply_synced_rules(rules):
     return restart_or_rollback(rollbacks, "已同步规则：" + ", ".join(applied), "规则已写入")
 
 
-def update_config_values(local_dns, remote_dns, ttl):
+def update_config_values(local_dns, remote_dns, ttl, local_backup=None):
+    # local_backup=None 表示不动备用国内 DNS；空串表示删掉备用行
     if not os.path.exists(CONFIG_FILE):
         return False, "配置文件不存在"
     if not re.fullmatch(r"\d{1,7}", str(ttl or "")):
         return False, "TTL 必须是数字"
-    for label, value in (("国内 DNS", local_dns), ("国外 DNS", remote_dns)):
+    for label, value in (("国内 DNS", local_dns), ("国外 DNS", remote_dns), ("备用国内 DNS", local_backup or "")):
         if not is_safe_text(value, 200):
             return False, f"{label} 不合法"
     local_dns, local_error = normalize_upstream(local_dns, default_scheme="udp")
     if local_error:
         return False, f"国内 DNS {local_error}"
+    if local_backup is not None and str(local_backup).strip():
+        local_backup, backup_error = normalize_upstream(local_backup, default_scheme="udp")
+        if backup_error:
+            return False, f"备用国内 DNS {backup_error}"
     remote_dns, remote_error = normalize_upstream(remote_dns, default_port=53)
     if remote_error:
         return False, f"国外 DNS {remote_error}"
@@ -2025,20 +2184,14 @@ def update_config_values(local_dns, remote_dns, ttl):
         text,
         count=1,
     )
-    new_text, local_count = re.subn(
-        r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_LOCAL\s*)$',
-        quoted_replacer(local_dns.strip()),
-        new_text,
-        count=1,
-    )
-    new_text, remote_count = re.subn(
-        r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_REMOTE\s*)$',
-        quoted_replacer(remote_dns.strip()),
-        new_text,
-        count=1,
-    )
+    new_text, local_count = replace_tag_addr(new_text, "TAG_LOCAL", local_dns)
+    new_text, remote_count = replace_tag_addr(new_text, "TAG_REMOTE", remote_dns)
     if ttl_count != 1 or local_count != 1 or remote_count != 1:
         return False, "没有找到 TAG_LOCAL、TAG_REMOTE 或 lazy_cache_ttl"
+    if local_backup is not None:
+        new_text, backup_error = set_local_backup(new_text, local_backup)
+        if backup_error:
+            return False, f"备用国内 DNS 写入失败：{backup_error}"
 
     if new_text == text:
         return True, "配置无变化"
@@ -2319,6 +2472,7 @@ def api_status():
             "web_port": env.get("WEB_PORT", "7840"),
             "health": service_health_summary(running, enabled, rescue, values),
             **server_time_info(),
+            **template_version_info(),
             **values,
         }
     )
@@ -2383,6 +2537,7 @@ def api_settings():
         data.get("local_dns", ""),
         data.get("remote_dns", ""),
         data.get("ttl", ""),
+        data.get("local_dns_backup") if "local_dns_backup" in data else None,
     )
     return jsonify({"success": ok, "message": message})
 
@@ -2415,6 +2570,15 @@ def api_config():
     write_config_text(content)
     ok, message = restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
     return jsonify({"success": ok, "message": message})
+
+
+@app.route("/api/config/migrate", methods=["POST"])
+@login_required
+@operation_locked
+def api_config_migrate():
+    # 用当前内置模板重建 config.yaml，保留上游与 TTL；沙箱校验失败则不做任何修改
+    result = migrate_to_current_template()
+    return jsonify({**result, **template_version_info()})
 
 
 @app.route("/api/backups", methods=["GET", "POST"])

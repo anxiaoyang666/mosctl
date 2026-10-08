@@ -1,3 +1,4 @@
+# mosctl-template: 4
 log:
   level: info
   file: "/var/log/mosdns.log"
@@ -15,13 +16,16 @@ plugins:
       dump_file: "/etc/mosdns/cache.dump"
       dump_interval: 600
 
-  # 国内上游
+  # 国内上游：主上游 + 备用上游。concurrent 是同时并发查询的上游数（mosdns v5 forward
+  # 插件字段，上限 3），设成 2 时两个上游一起查、取先返回的成功结果，主上游超时不再拖慢解析
   - tag: forward_local
     type: forward
     args:
+      concurrent: 2
       upstreams:
         - addr: "udp://119.29.29.29" # TAG_LOCAL
           enable_pipeline: true
+        - addr: "udp://223.5.5.5" # TAG_LOCAL_BACKUP
 
   # 国外上游
   - tag: forward_remote
@@ -64,6 +68,16 @@ plugins:
     args:
       files:
         - "/etc/mosdns/rules/hosts.txt"
+
+  # 拒绝 HTTPS/SVCB 记录（qtype 65）：这类记录可带 ipv4hint/ipv6hint/ECH 真实地址，
+  # 浏览器会直接拿去连，绕过 mihomo 的 fake-ip。用 reject 0 回空的 NOERROR（NODATA）：
+  # mosdns v5 的 reject <rcode> 只是 SetReply 后设置 rcode、不带任何记录；
+  # 不用 reject 3（NXDOMAIN），NXDOMAIN 表示"整个域名不存在"，客户端可能连同 A/AAAA 一起负缓存
+  - tag: reject_https_record
+    type: sequence
+    args:
+      - matches: qtype 65
+        exec: reject 0
 
   - tag: has_resp_sequence
     type: sequence
@@ -121,6 +135,9 @@ plugins:
     type: sequence
     args:
       - exec: $hosts
+      - exec: jump has_resp_sequence
+
+      - exec: $reject_https_record
       - exec: jump has_resp_sequence
 
       - exec: $query_is_force_cn_domain

@@ -23,6 +23,8 @@ fi
 CONFIG_FILE="/etc/mosdns/config.yaml"
 BACKUP_DIR="/etc/mosdns/backup"
 MOSDNS_BIN="/usr/local/bin/mosdns"
+# 本机内置模板（面板升级时刷新），用来对比 config.yaml 的模板结构版本
+LOCAL_TEMPLATE_FILE="/etc/mosdns/templates/default.yaml"
 # 仓库里默认配置模板的路径，mosctl sync 拉的就是这个文件
 TEMPLATE_REPO_PATH="remote-root/etc/mosdns/templates/default.yaml"
 LOG_FILE="/var/log/mosdns.log"
@@ -54,8 +56,9 @@ kernel_version() {
     [ -n "$version" ] && echo "$version" || echo "unknown"
 }
 
-# 取 "- addr: xxx # TAG_LOCAL/TAG_REMOTE" 行里的地址；兼容双引号、单引号和不带引号
-# 用法：config_tag_value <配置文件> <TAG_LOCAL|TAG_REMOTE>
+# 取 "- addr: xxx # TAG_LOCAL/TAG_LOCAL_BACKUP/TAG_REMOTE" 行里的地址；兼容双引号、单引号和不带引号
+# TAG 后面只允许空白到行尾，所以 TAG_LOCAL 不会误中 TAG_LOCAL_BACKUP
+# 用法：config_tag_value <配置文件> <TAG_LOCAL|TAG_LOCAL_BACKUP|TAG_REMOTE>
 config_tag_value() {
     local file="$1"
     local tag="$2"
@@ -177,34 +180,50 @@ rescue_disable() {
     # 打印切回的具体 DNS 信息
     if [ "$1" != "silent" ] && [ -f "$CONFIG_FILE" ]; then
         local local_dns remote_dns
+        local local_backup
         local_dns="$(config_tag_value "$CONFIG_FILE" TAG_LOCAL)"
+        local_backup="$(config_tag_value "$CONFIG_FILE" TAG_LOCAL_BACKUP)"
         remote_dns="$(config_tag_value "$CONFIG_FILE" TAG_REMOTE)"
 
         echo -e "${GREEN}✅ 流量已切回正常上游配置：${PLAIN}"
-        echo -e "   🏠 国内: ${GREEN}${local_dns}${PLAIN}"
+        echo -e "   🏠 国内: ${GREEN}${local_dns}${PLAIN}${local_backup:+ (备用 ${local_backup})}"
         echo -e "   🌍 国外: ${GREEN}${remote_dns}${PLAIN}"
     fi
 }
 
-# 把旧配置里的 TTL / TAG_LOCAL / TAG_REMOTE 搬进新配置（和面板"恢复默认"的保留逻辑一致）
+# 把 "- addr: ... # <TAG>" 行的地址换成新值；TAG 必须在行尾，TAG_LOCAL 不会改到 TAG_LOCAL_BACKUP
+# 用法：set_config_tag_value <配置文件> <TAG> <地址>
+set_config_tag_value() {
+    local file="$1"
+    local tag="$2"
+    local value="$3"
+    sed -i "s|^\(.*\)- addr:.*#[[:space:]]*${tag}[[:space:]]*\$|\1- addr: \"$(sed_escape "$value")\" # ${tag}|" "$file"
+}
+
+# 把旧配置里的 TTL / TAG_LOCAL / TAG_LOCAL_BACKUP / TAG_REMOTE 搬进新配置（和面板"恢复默认"的保留逻辑一致）
+# 旧配置没有 TAG_LOCAL_BACKUP 时保留新模板默认的备用上游
 # 用法：carry_over_config_values <旧配置> <新配置>
 carry_over_config_values() {
     local old="$1"
     local new="$2"
-    local old_ttl old_local_dns old_remote_dns
+    local old_ttl old_local_dns old_local_backup old_remote_dns
     [ -f "$old" ] || return 0
     old_ttl="$(grep -E '^[[:space:]]*lazy_cache_ttl:' "$old" | head -n 1 | awk '{print $2}')"
     old_local_dns="$(config_tag_value "$old" TAG_LOCAL)"
+    old_local_backup="$(config_tag_value "$old" TAG_LOCAL_BACKUP)"
     old_remote_dns="$(config_tag_value "$old" TAG_REMOTE)"
 
     if [[ "$old_ttl" =~ ^[0-9]+$ ]]; then
         sed -i "s/lazy_cache_ttl: [0-9]*/lazy_cache_ttl: ${old_ttl}/" "$new"
     fi
     if [ -n "$old_local_dns" ] && ! upstream_invalid "$old_local_dns"; then
-        sed -i "s|\(.*\)- addr:.*# TAG_LOCAL|\1- addr: \"$(sed_escape "$old_local_dns")\" # TAG_LOCAL|" "$new"
+        set_config_tag_value "$new" TAG_LOCAL "$old_local_dns"
+    fi
+    if [ -n "$old_local_backup" ] && ! upstream_invalid "$old_local_backup"; then
+        set_config_tag_value "$new" TAG_LOCAL_BACKUP "$old_local_backup"
     fi
     if [ -n "$old_remote_dns" ] && ! upstream_invalid "$old_remote_dns"; then
-        sed -i "s|\(.*\)- addr:.*# TAG_REMOTE|\1- addr: \"$(sed_escape "$old_remote_dns")\" # TAG_REMOTE|" "$new"
+        set_config_tag_value "$new" TAG_REMOTE "$old_remote_dns"
     fi
 }
 
@@ -262,15 +281,20 @@ sync_config() {
 
 change_upstream() {
     local type=$1
-    local tag_marker=$2
+    local tag=$2
     local default_proto=$3
     echo -e "\n${YELLOW}📝 修改 [$type] DNS 上游${PLAIN}"
-    grep "$tag_marker" $CONFIG_FILE | grep -v "grep"
+    # TAG 锚定到行尾：改国内 DNS（TAG_LOCAL）不会连带改到备用行（TAG_LOCAL_BACKUP）
+    if ! grep -qE "#[[:space:]]*${tag}[[:space:]]*\$" "$CONFIG_FILE"; then
+        echo -e "${RED}❌ 当前配置里没有 # ${tag} 行（旧模板？可先同步默认配置，或在面板「解析策略」里保存）${PLAIN}"
+        return 1
+    fi
+    grep -E "#[[:space:]]*${tag}[[:space:]]*\$" "$CONFIG_FILE"
     if [ -t 0 ]; then read -p "地址: " new_ip; else echo -n "地址: "; read new_ip < /dev/tty; fi
     if [ -z "$new_ip" ]; then echo "已取消"; return; fi
     if upstream_invalid "$new_ip"; then echo -e "${RED}❌ 地址不能包含双引号、反斜杠或 #${PLAIN}"; return 1; fi
     if [[ -n "$default_proto" ]] && [[ "$new_ip" != *"://"* ]]; then new_ip="${default_proto}://${new_ip}"; fi
-    sed -i "s|\(.*\)- addr:.*$tag_marker|\1- addr: \"$(sed_escape "$new_ip")\" $tag_marker|" $CONFIG_FILE
+    set_config_tag_value "$CONFIG_FILE" "$tag" "$new_ip"
     systemctl restart mosdns && echo -e "${GREEN}✅ 修改成功！${PLAIN}"
 }
 
@@ -413,11 +437,13 @@ upstream_menu() {
     echo -e "\n${GREEN}--- 修改上游 DNS ---${PLAIN}"
     echo -e "  1. 🇨🇳 修改国内 DNS (默认补全 udp://)"
     echo -e "  2. 🌍 修改国外 DNS (不强制补全)"
+    echo -e "  3. 🇨🇳 修改备用国内 DNS (默认补全 udp://)"
     echo -e "  0. 🔙 返回"
     if [ -t 0 ]; then read -p "请选择: " uc; else echo -n "请选择: "; read uc < /dev/tty; fi
     case "$uc" in
-        1) change_upstream "国内" "# TAG_LOCAL" "udp" ;;
-        2) change_upstream "国外" "# TAG_REMOTE" "" ;;
+        1) change_upstream "国内" "TAG_LOCAL" "udp" ;;
+        2) change_upstream "国外" "TAG_REMOTE" "" ;;
+        3) change_upstream "备用国内" "TAG_LOCAL_BACKUP" "udp" ;;
         0) return ;;
     esac
 }
@@ -565,6 +591,13 @@ uninstall_mosdns() {
     fi
 }
 
+# 读文件前 5 行的 "# mosctl-template: N" 标记；没有标记按 0（和面板 template_version 一致）
+template_version_of() {
+    local version=""
+    [ -f "$1" ] && version="$(head -n 5 "$1" | sed -nE 's/^[[:space:]]*#[[:space:]]*mosctl-template[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' | head -n 1)"
+    echo "${version:-0}"
+}
+
 show_menu() {
     clear
     local status_raw=$(systemctl is-active mosdns 2>/dev/null)
@@ -577,6 +610,12 @@ show_menu() {
     echo -e "${GREEN}      MosDNS 管理面板 (${SCRIPT_VER})      ${PLAIN}"
     echo -e "${GREEN}=====================================${PLAIN}"
     echo -e " 内核版本: ${GREEN}${kernel_ver}${PLAIN} | 状态: $status_text"
+    local config_tpl latest_tpl
+    config_tpl="$(template_version_of "$CONFIG_FILE")"
+    latest_tpl="$(template_version_of "$LOCAL_TEMPLATE_FILE")"
+    if [ "$config_tpl" -lt "$latest_tpl" ]; then
+        echo -e " ${YELLOW}配置模板 v${config_tpl}（最新 v${latest_tpl}，可在面板迁移）${PLAIN}"
+    fi
     echo -e "${GREEN}=====================================${PLAIN}"
     echo -e "   1. 🛠️  服务管理 (启动/停止/重启)"
     echo -e "   2. 🔄  同步配置 (拉取仓库默认模板，保留上游/TTL)"

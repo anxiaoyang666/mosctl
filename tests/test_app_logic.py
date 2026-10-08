@@ -307,3 +307,39 @@ class AppLogicTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CronLoggingMigrationTest(unittest.TestCase):
+    """migrate_cron_logging 在 import 末尾执行，必须真的能跑（曾因定义顺序 NameError 被静默吞掉）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = load_app(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_rewrites_devnull_entry_and_is_called_at_import(self):
+        source = APP.read_text(encoding="utf-8")
+        self.assertLess(source.find("def migrate_cron_logging"), source.find("\n    migrate_cron_logging()\n"))
+        self.assertLess(source.find("def read_crontab_lines"), source.find("\n    migrate_cron_logging()\n"))
+        self.assertLess(source.find("def is_geo_update_cron"), source.find("\n    migrate_cron_logging()\n"))
+
+        written = []
+        real_run = self.app.subprocess.run
+
+        def fake_run(args, **kwargs):
+            if args == ["crontab", "-l"]:
+                return types.SimpleNamespace(returncode=0, stdout="0 2 * * * /usr/local/bin/mosctl update > /dev/null 2>&1\n", stderr="")
+            written.append(kwargs.get("input"))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.app.subprocess.run = fake_run
+        try:
+            self.assertTrue(self.app.migrate_cron_logging())
+            self.assertEqual(written, ["0 2 * * * /usr/local/bin/mosctl update >> /var/log/mosctl-update.log 2>&1\n"])
+            self.app.subprocess.run = lambda args, **k: types.SimpleNamespace(returncode=0, stdout=written[0], stderr="")
+            self.assertFalse(self.app.migrate_cron_logging(), "已是日志形式时不应再写 crontab")
+        finally:
+            self.app.subprocess.run = real_run
+

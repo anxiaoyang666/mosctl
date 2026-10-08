@@ -55,7 +55,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.29"
+PANEL_VERSION = "0.3.30"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -1003,11 +1003,6 @@ def migrate_cron_logging():
         return False
     return True
 
-
-try:
-    migrate_cron_logging()
-except Exception:
-    pass
 
 
 @app.before_request
@@ -2889,6 +2884,13 @@ def api_logs():
     if request.args.get("order", "desc") == "desc":
         logs = "\n".join(reversed(logs.splitlines()))
     return jsonify({"logs": logs, "entries": parse_log_entries(logs)})
+
+
+# 放在所有函数定义之后：它用到 read_crontab_lines / is_geo_update_cron，放前面会 NameError
+try:
+    migrate_cron_logging()
+except Exception:
+    pass
 
 
 if __name__ == "__main__":

@@ -570,9 +570,10 @@ uninstall_mosdns() {
         rm -rf /etc/mosdns
         rm -f /usr/local/bin/mosdns
         rm -f /usr/local/bin/mosdns-web
-        rm -f /var/log/mosdns.log /var/log/mosctl-update.log
+        rm -f /var/log/mosdns.log /var/log/mosctl-update.log /var/log/mosctl-auto-update.log
         
-        crontab -l 2>/dev/null | grep -v "mosctl update" | crontab -
+        # Geo 更新和自动更新（# MOSCTL_AUTO_UPDATE）两条定时任务都要清掉
+        crontab -l 2>/dev/null | grep -v "mosctl update" | grep -v "MOSCTL_AUTO_UPDATE" | grep -v "auto_update.py" | crontab -
 
         # 只在 resolv.conf 是普通文件且指向本机时才改写；
         # systemd-resolved / NetworkManager 管理的符号链接由它们自己维护，改了也会被覆盖

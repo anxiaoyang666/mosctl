@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 import base64
+import fcntl
 import glob
 import ipaddress
 import os
@@ -8,7 +9,9 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
+import sys
 import threading
 import time
 from urllib import error, request as urlrequest
@@ -54,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.37"
+PANEL_VERSION = "0.3.38"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -62,6 +65,28 @@ SESSION_LIFETIME_DAYS = 30
 DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
 DOWNLOAD_TIME_BUDGET = 300
 REMOTE_VERSION_CACHE_TTL = 3600
+MOSDNS_RELEASES_API = "https://api.github.com/repos/IrineSistiana/mosdns/releases?per_page=30"
+MOSDNS_RELEASE_DOWNLOAD = "https://github.com/IrineSistiana/mosdns/releases/download"
+# 自动更新：cron 每天按 AUTO_UPDATE_TIME（服务器本地时间）跑一次 auto_update.py
+AUTO_UPDATE_SCRIPT = f"{MANAGER_DIR}/auto_update.py"
+AUTO_UPDATE_STATE_FILE = f"{MOSDNS_DIR}/auto_update_state.json"
+AUTO_UPDATE_LOCK_FILE = f"{MOSDNS_DIR}/.auto_update.lock"
+AUTO_UPDATE_LOG = "/var/log/mosctl-auto-update.log"
+AUTO_UPDATE_CRON_MARKER = "# MOSCTL_AUTO_UPDATE"
+AUTO_UPDATE_DEFAULTS = {
+    "AUTO_UPDATE_ENABLED": "true",
+    "AUTO_UPDATE_TIME": "04:10",
+    "AUTO_UPDATE_CORE_MIN_AGE_DAYS": "3",
+    "AUTO_UPDATE_PANEL_MIN_AGE_DAYS": "0",
+}
+AUTO_UPDATE_MAX_AGE_DAYS = 365
+AUTO_UPDATE_RESULTS = ("updated", "up_to_date", "skipped", "failed", "rolled_back", "started")
+AUTO_UPDATE_DRY_RUN_TIMEOUT = 150
+# 升级内核后的健康检查：服务 active、版本正确、国内/国外域名在本机 53 端口都有应答
+CORE_HEALTH_DOMAINS = ("www.baidu.com", "www.google.com")
+CORE_HEALTH_TIMEOUT = 20
+CORE_HEALTH_INTERVAL = 1.0
+CORE_HEALTH_DNS_SERVER = ("127.0.0.1", 53)
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCK_SECONDS = 60
 # 同一时间只允许一个会改写配置/重启服务的操作；.env 的读改写用单独的锁，
@@ -749,7 +774,9 @@ def sandbox_config_text(content, tmpdir):
     return content, api_port
 
 
-def config_starts(path, wait_seconds=3.0):
+def config_starts(path, wait_seconds=3.0, binary=None):
+    # binary 默认是正在用的内核；内核升级时传入新下载的二进制，先确认它能跑当前配置
+    binary = binary or MOSDNS_BIN
     proc = None
     tmpdir = None
     try:
@@ -761,7 +788,7 @@ def config_starts(path, wait_seconds=3.0):
         with open(check_path, "w", encoding="utf-8") as target:
             target.write(content)
         proc = subprocess.Popen(
-            [MOSDNS_BIN, "start", "-d", tmpdir],
+            [binary, "start", "-d", tmpdir],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1076,6 +1103,62 @@ def github_archive_url(repo_url, branch):
     return f"https://github.com/{owner}/{name}/archive/refs/heads/{quote(branch, safe='/')}.zip"
 
 
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def github_commit_archive_url(repo_url, sha):
+    # 按提交下载：自动更新判定"最新提交满 N 天"后装的就是那一个提交，不会被期间新推的提交顶掉
+    parts = github_repo_parts(repo_url)
+    if not parts or not COMMIT_SHA_RE.match(str(sha or "")):
+        return ""
+    owner, name = parts
+    return f"https://github.com/{owner}/{name}/archive/{sha}.zip"
+
+
+def github_commits_api_url(repo_url, branch, path="remote-root"):
+    parts = github_repo_parts(repo_url)
+    if not parts:
+        return ""
+    owner, name = parts
+    return (
+        f"https://api.github.com/repos/{owner}/{name}/commits"
+        f"?path={quote(path, safe='/')}&sha={quote(branch, safe='')}&per_page=1"
+    )
+
+
+def parse_github_time(value):
+    # GitHub 时间都是 2026-10-01T12:34:56Z；解析失败返回 None
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def latest_panel_commit(settings=None):
+    """MOSCTL_BRANCH 上最近一次改动 remote-root/ 的提交；先直连 GitHub API，失败再走 GH_PROXY。"""
+    settings = settings or mosctl_repo_settings()
+    url = github_commits_api_url(settings["repo_url"], settings["branch"])
+    if not url:
+        return {"success": False, "message": "仅支持 GitHub 仓库，请检查 MOSCTL_REPO_URL"}
+    ok, text, source = read_url_text(github_url_candidates(url), timeout=15)
+    if not ok:
+        return {"success": False, "message": "GitHub 提交接口不可用：" + text}
+    try:
+        data = json.loads(text)
+        item = data[0]
+        sha = str(item["sha"])
+        date = str(item["commit"]["committer"]["date"])
+    except (ValueError, TypeError, KeyError, IndexError):
+        return {"success": False, "message": "GitHub 提交接口返回了无法识别的数据"}
+    committed_at = parse_github_time(date)
+    if not COMMIT_SHA_RE.match(sha) or committed_at is None:
+        return {"success": False, "message": "GitHub 提交接口返回了无法识别的数据"}
+    return {"success": True, "sha": sha, "date": date, "committed_at": committed_at, "source": source}
+
+
 def github_raw_app_url(repo_url, branch):
     parts = github_repo_parts(repo_url)
     if not parts:
@@ -1207,9 +1290,12 @@ def panel_upgrade_state(force=False):
     }
 
 
-def download_mosctl_source(tmpdir):
+def download_mosctl_source(tmpdir, ref=None):
     settings = mosctl_repo_settings()
-    archive_url = github_archive_url(settings["repo_url"], settings["branch"])
+    if ref:
+        archive_url = github_commit_archive_url(settings["repo_url"], ref)
+    else:
+        archive_url = github_archive_url(settings["repo_url"], settings["branch"])
     if not archive_url:
         return False, "仅支持 GitHub 仓库在线升级，请检查 MOSCTL_REPO_URL", None, settings
     archive_url = cache_bust_url(archive_url)
@@ -1334,9 +1420,10 @@ def schedule_web_restart():
     )
 
 
-def upgrade_mosctl_panel():
+def upgrade_mosctl_panel(ref=None, on_install=None):
+    # ref：指定提交（自动更新用）；on_install(新版本号)：确认要装、替换文件之前回调，用于记录"开始 → vX"
     with tempfile.TemporaryDirectory() as tmpdir:
-        ok, source, source_root, settings = download_mosctl_source(tmpdir)
+        ok, source, source_root, settings = download_mosctl_source(tmpdir, ref=ref)
         if not ok:
             return False, source, False
 
@@ -1354,6 +1441,8 @@ def upgrade_mosctl_panel():
                 False,
             )
 
+        if on_install:
+            on_install(remote_version)
         backup_root = backup_panel_targets()
         try:
             install_panel_payload(source_root)
@@ -1377,25 +1466,201 @@ def upgrade_mosctl_panel():
     )
 
 
-def upgrade_mosdns_core():
+def build_dns_query(name, query_id, qtype=1):
+    header = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
+    labels = [label for label in str(name).strip(".").split(".") if label]
+    qname = b"".join(bytes([len(label)]) + label.encode("idna") for label in labels) + b"\x00"
+    return header + qname + struct.pack("!HH", qtype, 1)
+
+
+def parse_dns_answer_count(data, query_id):
+    # 只看报文头：ID 对得上、是响应、RCODE=0、至少一条应答记录
+    if len(data) < 12:
+        return False, "响应过短"
+    rid, flags, _, ancount, _, _ = struct.unpack("!HHHHHH", data[:12])
+    if rid != query_id or not flags & 0x8000:
+        return False, "响应不匹配"
+    rcode = flags & 0x000F
+    if rcode:
+        return False, f"RCODE={rcode}"
+    if not ancount:
+        return False, "没有应答记录"
+    return True, f"{ancount} 条应答"
+
+
+def dns_query(name, server=None, timeout=2.0):
+    """向本机 mosdns 发一个真实的 UDP A 记录查询（不依赖 dig）。返回 (ok, 说明)。"""
+    server = server or CORE_HEALTH_DNS_SERVER
+    query_id = secrets.randbelow(65536)
+    try:
+        packet = build_dns_query(name, query_id)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            sock.sendto(packet, server)
+            deadline = time.time() + timeout
+            while True:
+                data, _ = sock.recvfrom(4096)
+                ok, detail = parse_dns_answer_count(data, query_id)
+                if ok or detail != "响应不匹配" or time.time() >= deadline:
+                    return ok, f"{name}：{detail}"
+    except Exception as exc:
+        return False, f"{name}：{exc or '查询超时'}"
+
+
+def core_health_check(expected_version=None, timeout=None):
+    """内核换完后的健康检查：timeout 秒内反复检查，直到服务 active、版本对、国内外域名都有应答。"""
+    timeout = CORE_HEALTH_TIMEOUT if timeout is None else timeout
+    deadline = time.time() + timeout
+    expected = version_tuple(expected_version) if expected_version else None
+    while True:
+        problems = []
+        if not service_active():
+            problems.append("mosdns 服务不是 active")
+        else:
+            if expected:
+                reported = get_version()
+                if version_tuple(reported) != expected:
+                    problems.append(f"mosdns version 报告 {clean_version(reported)}，预期 {clean_version(expected_version)}")
+            for name in CORE_HEALTH_DOMAINS:
+                ok, detail = dns_query(name)
+                if not ok:
+                    problems.append("DNS 查询失败：" + detail)
+        if not problems:
+            return True, "健康检查通过：服务运行中、版本正确、国内外域名均有应答"
+        if time.time() >= deadline:
+            return False, f"健康检查失败（{timeout} 秒内未恢复）：\n" + "\n".join(problems)
+        time.sleep(CORE_HEALTH_INTERVAL)
+
+
+def replace_binary(source, target):
+    # 先拷到同目录临时文件再 rename：不会出现半个二进制，也不怕 "Text file busy"
+    tmp_path = f"{target}.mosctl-new"
+    shutil.copy2(source, tmp_path)
+    os.chmod(tmp_path, 0o755)
+    os.replace(tmp_path, target)
+
+
+def mosdns_release_asset_url(tag, asset):
+    return f"{MOSDNS_RELEASE_DOWNLOAD}/{quote(str(tag), safe='')}/{asset}"
+
+
+def mosdns_stable_releases():
+    """官方 release 列表里的稳定版（排除 draft / prerelease），带发布时间和安装包名。"""
+    ok, text, source = read_url_text(github_url_candidates(MOSDNS_RELEASES_API), timeout=15)
+    if not ok:
+        return {"success": False, "releases": [], "message": "获取 mosdns release 列表失败：" + text}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {"success": False, "releases": [], "message": "mosdns release 接口返回了非 JSON 数据"}
+    if not isinstance(data, list):
+        return {"success": False, "releases": [], "message": "mosdns release 接口返回了非列表数据"}
+    releases = []
+    for item in data:
+        if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
+            continue
+        tag = str(item.get("tag_name") or "")
+        version = version_tuple(tag)
+        if not version:
+            continue
+        assets = [asset.get("name", "") for asset in item.get("assets") or [] if isinstance(asset, dict)]
+        releases.append(
+            {
+                "tag": tag,
+                "version": version,
+                "published_at": parse_github_time(item.get("published_at")),
+                "assets": assets,
+                "url": item.get("html_url", ""),
+            }
+        )
+    return {"success": True, "releases": releases, "source": source}
+
+
+def select_core_release(releases, current_version, min_age_days, now=None, asset=None):
+    """从稳定版里挑"比当前新、发布满 min_age_days 天、有本机安装包"的最高版本；绝不降级。
+
+    返回 {action: update|up_to_date|skipped, release, newest, note}。
+    """
+    now = time.time() if now is None else now
+    current = version_tuple(current_version)
+    if not current:
+        return {"action": "skipped", "release": None, "newest": None, "note": "无法识别当前内核版本，跳过自动更新"}
+    newest = max(releases, key=lambda item: item["version"]) if releases else None
+    newer = [item for item in releases if item["version"] > current]
+    if not newer:
+        return {"action": "up_to_date", "release": None, "newest": newest, "note": f"当前 {clean_version(current_version)} 已是最新稳定版"}
+    min_age = max(0, int(min_age_days)) * 86400
+    eligible = []
+    notes = []
+    for item in sorted(newer, key=lambda entry: entry["version"], reverse=True):
+        published = item.get("published_at")
+        if published is None:
+            notes.append(f"{item['tag']} 没有发布时间，跳过")
+            continue
+        age = now - published
+        if age < min_age:
+            notes.append(f"{item['tag']} 发布 {age / 86400:.1f} 天，未满 {min_age_days} 天")
+            continue
+        if asset and asset not in item.get("assets", []):
+            notes.append(f"{item['tag']} 没有本机安装包 {asset}")
+            continue
+        eligible.append(item)
+    if not eligible:
+        return {"action": "skipped", "release": None, "newest": newest, "note": "；".join(notes) or "没有符合条件的新版本"}
+    best = eligible[0]
+    note = f"可更新到 {best['tag']}"
+    if notes:
+        note += "（" + "；".join(notes) + "）"
+    return {"action": "update", "release": best, "newest": newest, "note": note}
+
+
+def install_mosdns_core(release=None):
+    """下载并替换 mosdns 内核。release 为 None 时用官方 latest（面板手动升级）。
+
+    步骤：不降级 → 下载 + zip 校验 → 新二进制版本必须等于目标 → 用新二进制在沙盒里跑当前配置
+    → 备份旧内核 → 停服务、替换、重启 → 20 秒健康检查 → 不通过就恢复旧内核并复查。
+    返回 {result: updated|up_to_date|failed|rolled_back, message, from, to}。
+    """
+    outcome = {"result": "failed", "message": "", "from": "", "to": ""}
+
+    def done(result, message):
+        outcome.update(result=result, message=message)
+        return outcome
+
     asset = mosdns_asset_name()
     if not asset:
-        return False, "当前 CPU 架构暂不支持自动升级"
+        return done("failed", "当前 CPU 架构暂不支持自动升级")
 
     old_ok, old_version = run_cmd([MOSDNS_BIN, "version"], timeout=10) if os.path.exists(MOSDNS_BIN) else (False, "未知")
-    latest = latest_mosdns_release()
-    if not latest.get("success"):
-        return False, latest.get("message", "获取最新版本失败，已取消升级")
-    current_v = version_tuple(old_version)
-    latest_v = version_tuple(latest.get("latest"))
-    if current_v and latest_v and latest_v <= current_v:
-        return False, f"当前版本不低于官方 latest release，已取消升级。\n当前版本：{clean_version(old_version)}\n官方 latest：{clean_version(latest.get('latest'))}"
-    if not latest.get("asset_available"):
-        return False, f"官方 latest release 未发现当前架构安装包：{asset}"
+    old_version = old_version.splitlines()[0] if old_ok and old_version else old_version
+    outcome["from"] = clean_version(old_version) if old_ok else "未知"
+    if release is None:
+        latest = latest_mosdns_release()
+        if not latest.get("success"):
+            return done("failed", latest.get("message", "获取最新版本失败，已取消升级"))
+        tag = latest.get("latest")
+        asset_available = latest.get("asset_available")
+        direct_url = f"{MOSDNS_RELEASE_BASE}/{asset}"
+    else:
+        tag = release.get("tag")
+        asset_available = asset in (release.get("assets") or [])
+        direct_url = mosdns_release_asset_url(tag, asset)
+    current_v = version_tuple(old_version) if old_ok else None
+    latest_v = version_tuple(tag)
+    outcome["to"] = clean_version(tag)
+    if not latest_v:
+        return done("failed", f"无法识别目标版本号：{tag or '空'}，已取消升级")
+    if current_v and latest_v <= current_v:
+        return done(
+            "up_to_date",
+            f"当前版本不低于目标版本，已取消升级（不降级）。\n当前版本：{clean_version(old_version)}\n目标版本：{clean_version(tag)}",
+        )
+    if not asset_available:
+        return done("failed", f"{clean_version(tag)} 未发现当前架构安装包：{asset}")
+    if not os.path.exists(CONFIG_FILE):
+        return done("failed", f"找不到 {CONFIG_FILE}，无法用新内核做沙盒校验，已取消升级")
 
-    direct_url = f"{MOSDNS_RELEASE_BASE}/{asset}"
     urls = github_url_candidates(direct_url)
-
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
     backup_bin = f"{BACKUP_DIR}/{KERNEL_BACKUP_PREFIX}{stamp}"
@@ -1404,20 +1669,22 @@ def upgrade_mosdns_core():
         zip_path = os.path.join(tmpdir, asset)
         ok, source = download_file(urls, zip_path)
         if not ok:
-            return False, "下载 mosdns 内核失败：\n" + source
+            return done("failed", "下载 mosdns 内核失败：\n" + source)
 
         # 官方 release 没有 checksum 文件，只能做 zip 完整性校验
         zip_ok, zip_message = verify_zip_file(zip_path)
         if not zip_ok:
-            return False, f"{zip_message}，已取消升级"
+            return done("failed", f"{zip_message}，已取消升级")
+        extract_dir = os.path.join(tmpdir, "extract")
         try:
             with zipfile.ZipFile(zip_path) as archive:
-                archive.extractall(tmpdir)
+                archive.extractall(extract_dir)
         except zipfile.BadZipFile:
-            return False, "下载文件不是有效 zip，已取消升级"
+            return done("failed", "下载文件不是有效 zip，已取消升级")
 
         candidate = None
-        for root, _, files in os.walk(tmpdir):
+        new_version = ""
+        for root, _, files in os.walk(extract_dir):
             for name in files:
                 path = os.path.join(root, name)
                 if name == "mosdns" or name.startswith("mosdns"):
@@ -1434,38 +1701,63 @@ def upgrade_mosdns_core():
             if candidate:
                 break
         if not candidate:
-            return False, "压缩包里没有找到可运行的 mosdns 二进制"
+            return done("failed", "压缩包里没有找到可运行的 mosdns 二进制")
+        if version_tuple(new_version) != latest_v:
+            return done("failed", f"压缩包里的内核报告版本 {clean_version(new_version)}，与目标 {clean_version(tag)} 不符，已取消升级")
+
+        # 先用新内核在沙盒里跑一遍当前配置：跑不起来就放弃，正在用的内核一点不动
+        sandbox_ok, sandbox_message = config_starts(CONFIG_FILE, binary=candidate)
+        if not sandbox_ok:
+            return done("failed", "新内核无法用当前配置启动（沙盒校验失败），已放弃升级，现有内核未改动：\n" + sandbox_message)
 
         if os.path.exists(MOSDNS_BIN):
             shutil.copy2(MOSDNS_BIN, backup_bin)
 
         stop_ok, stop_message = run_cmd(["systemctl", "stop", "mosdns"], timeout=30)
         if not stop_ok:
-            return False, "停止 mosdns 失败，未替换内核：\n" + stop_message
+            return done("failed", "停止 mosdns 失败，未替换内核：\n" + stop_message)
         try:
-            shutil.copy2(candidate, MOSDNS_BIN)
-            os.chmod(MOSDNS_BIN, 0o755)
+            replace_binary(candidate, MOSDNS_BIN)
             ok, restart_message = restart_mosdns()
         except Exception as exc:
             ok, restart_message = False, str(exc)
 
-        if ok and service_active():
+        if ok:
+            ok, restart_message = core_health_check(tag)
+        if ok:
             cleanup_old_backups()
-            return True, f"mosdns 内核升级完成。\n来源：{source}\n旧版本：{clean_version(old_version)}\n新版本：{clean_version(new_version)}\n旧内核备份：{backup_bin}"
+            return done(
+                "updated",
+                f"mosdns 内核升级完成。\n来源：{source}\n旧版本：{clean_version(old_version)}\n新版本：{clean_version(new_version)}\n"
+                f"{restart_message}\n旧内核备份：{backup_bin}",
+            )
 
         # 回滚本身也可能失败（磁盘满、权限等），要把原因说清楚而不是抛 500
         if not os.path.exists(backup_bin):
-            return False, "新内核启动失败，且没有旧内核备份可回滚，请手动处理：\n" + restart_message
+            return done("failed", "新内核未通过启动/健康检查，且没有旧内核备份可回滚，请手动处理：\n" + restart_message)
         try:
-            shutil.copy2(backup_bin, MOSDNS_BIN)
-            os.chmod(MOSDNS_BIN, 0o755)
+            replace_binary(backup_bin, MOSDNS_BIN)
         except Exception as exc:
-            return False, f"新内核启动失败，回滚旧内核也失败（{exc}），请手动把 {backup_bin} 复制回 {MOSDNS_BIN}：\n{restart_message}"
+            return done(
+                "failed",
+                f"新内核未通过启动/健康检查，回滚旧内核也失败（{exc}），请手动把 {backup_bin} 复制回 {MOSDNS_BIN}：\n{restart_message}",
+            )
         rollback_ok, rollback_message = restart_mosdns()
-        text = "新内核启动失败，已回滚旧内核：\n" + restart_message
+        text = "新内核未通过启动/健康检查，已回滚旧内核：\n" + restart_message
         if not rollback_ok:
-            text += "\n\n回滚后重启仍失败，请手动检查：\n" + rollback_message
-        return False, text
+            text += "\n\n回滚后重启仍失败，请手动检查（必要时启用救援模式）：\n" + rollback_message
+        else:
+            recheck_ok, recheck_message = core_health_check(old_version if old_ok else None)
+            text += "\n\n回滚后复查：" + recheck_message
+            if not recheck_ok:
+                text += "\n请尽快检查，必要时启用救援模式。"
+        return done("rolled_back", text)
+
+
+def upgrade_mosdns_core():
+    # 面板"升级"按钮：升到官方 latest，同样走沙盒校验、健康检查和自动回滚
+    outcome = install_mosdns_core()
+    return outcome["result"] == "updated", outcome["message"]
 
 
 def backup_file(path, prefix):
@@ -1700,13 +1992,18 @@ def test_sync_peers(data):
     return ok, message, results
 
 
-def read_crontab_state():
-    # 返回 (行列表, crontab 命令是否存在)；没装 cron 的系统上 crontab 二进制不存在
+def read_crontab_state(strict=False):
+    # 返回 (行列表, crontab 命令是否存在)；没装 cron 的系统上 crontab 二进制不存在。
+    # strict=True 给无人值守的写入用：除了"还没有 crontab"以外的读取失败都抛错，
+    # 免得把读失败当成空表、写回时把 Geo 计划等其他行冲掉
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
     except FileNotFoundError:
         return [], False
     if result.returncode != 0:
+        detail = clean_output((result.stdout or "") + (result.stderr or ""))
+        if strict and "no crontab" not in detail.lower():
+            raise RuntimeError("读取 crontab 失败：" + (detail or f"退出码 {result.returncode}"))
         return [], True
     return result.stdout.splitlines(), True
 
@@ -1786,7 +2083,15 @@ def geo_update_status():
 
 def is_geo_update_cron(line):
     stripped = str(line or "").strip()
+    if is_auto_update_cron(stripped):
+        # 自动更新那一行归 write_auto_update_cron 管，Geo 计划的增删不能碰它
+        return False
     return bool(stripped and not stripped.startswith("#") and MOSCTL in stripped and re.search(r"\bupdate\b", stripped))
+
+
+def is_auto_update_cron(line):
+    stripped = str(line or "").strip()
+    return bool(stripped) and (AUTO_UPDATE_CRON_MARKER in stripped or "auto_update.py" in stripped)
 
 
 def parse_time_fields(minute, hour):
@@ -1921,16 +2226,295 @@ def write_geo_schedule(data):
     ]
     if cron_line:
         lines.extend([GEO_CRON_COMMENT, cron_line])
+    ok, message = write_crontab_lines(lines)
+    if not ok:
+        return False, message
+    return True, describe_geo_schedule(mode, time_value, weekday)
+
+
+CRONTAB_MISSING_MESSAGE = "系统没有 crontab 命令，请先安装 cron（Debian: apt install cron；RHEL: dnf install cronie）"
+
+
+def write_crontab_lines(lines):
     crontab_text = "\n".join(lines).strip()
     if crontab_text:
         crontab_text += "\n"
     try:
         result = subprocess.run(["crontab", "-"], input=crontab_text, capture_output=True, text=True, timeout=10)
     except FileNotFoundError:
-        return False, "系统没有 crontab 命令，请先安装 cron（Debian: apt install cron；RHEL: dnf install cronie）"
+        return False, CRONTAB_MISSING_MESSAGE
     if result.returncode != 0:
         return False, clean_output(result.stdout + result.stderr) or "写入 crontab 失败"
-    return True, describe_geo_schedule(mode, time_value, weekday)
+    return True, ""
+
+
+# ---------- 自动更新（设置 / cron / 状态 / 锁） ----------
+
+
+def parse_age_days(value):
+    if isinstance(value, bool):
+        return None
+    text = str(value).strip() if value is not None else ""
+    if not re.fullmatch(r"\d{1,3}", text):
+        return None
+    days = int(text)
+    return days if 0 <= days <= AUTO_UPDATE_MAX_AGE_DAYS else None
+
+
+def read_auto_update_settings(env=None):
+    # .env 里没有或写坏了就用默认值：默认开启、04:10、内核满 3 天、面板不等待
+    env = read_env() if env is None else env
+
+    def value(key):
+        raw = str(env.get(key, "")).strip()
+        return raw or AUTO_UPDATE_DEFAULTS[key]
+
+    enabled_raw = value("AUTO_UPDATE_ENABLED").lower()
+    time_value = value("AUTO_UPDATE_TIME")
+    if not normalize_schedule_time(time_value):
+        time_value = AUTO_UPDATE_DEFAULTS["AUTO_UPDATE_TIME"]
+    core_age = parse_age_days(value("AUTO_UPDATE_CORE_MIN_AGE_DAYS"))
+    panel_age = parse_age_days(value("AUTO_UPDATE_PANEL_MIN_AGE_DAYS"))
+    return {
+        "enabled": enabled_raw not in ("false", "0", "no", "off"),
+        "time": time_value,
+        "core_min_age_days": int(AUTO_UPDATE_DEFAULTS["AUTO_UPDATE_CORE_MIN_AGE_DAYS"]) if core_age is None else core_age,
+        "panel_min_age_days": int(AUTO_UPDATE_DEFAULTS["AUTO_UPDATE_PANEL_MIN_AGE_DAYS"]) if panel_age is None else panel_age,
+    }
+
+
+def validate_auto_update_settings(data):
+    """校验页面提交的设置，返回 (要写入 .env 的键值, 错误信息)。"""
+    if not isinstance(data, dict):
+        return None, "请求格式不正确"
+    enabled = data.get("enabled")
+    if isinstance(enabled, str) and enabled.lower() in ("true", "false"):
+        enabled = enabled.lower() == "true"
+    if not isinstance(enabled, bool):
+        return None, "启用开关必须是 true 或 false"
+    time_value = str(data.get("time") or "").strip()
+    if not normalize_schedule_time(time_value):
+        return None, "更新时间格式不合法，应为 HH:MM（00:00–23:59）"
+    core_age = parse_age_days(data.get("core_min_age_days"))
+    if core_age is None:
+        return None, f"内核最少发布天数必须是 0–{AUTO_UPDATE_MAX_AGE_DAYS} 的整数"
+    panel_age = parse_age_days(data.get("panel_min_age_days"))
+    if panel_age is None:
+        return None, f"面板最少提交天数必须是 0–{AUTO_UPDATE_MAX_AGE_DAYS} 的整数"
+    return {
+        "AUTO_UPDATE_ENABLED": "true" if enabled else "false",
+        "AUTO_UPDATE_TIME": time_value,
+        "AUTO_UPDATE_CORE_MIN_AGE_DAYS": str(core_age),
+        "AUTO_UPDATE_PANEL_MIN_AGE_DAYS": str(panel_age),
+    }, None
+
+
+def build_auto_update_cron_line(settings):
+    if not settings.get("enabled"):
+        return None
+    hour, minute = normalize_schedule_time(settings.get("time")) or (4, 10)
+    return f"{minute} {hour} * * * python3 {AUTO_UPDATE_SCRIPT} >> {AUTO_UPDATE_LOG} 2>&1 {AUTO_UPDATE_CRON_MARKER}"
+
+
+def write_auto_update_cron(settings=None):
+    """按设置增删 `# MOSCTL_AUTO_UPDATE` 那一行；其他行（Geo 计划等）原样保留，没变化就不写。"""
+    settings = settings or read_auto_update_settings()
+    try:
+        lines, available = read_crontab_state(strict=True)
+    except Exception as exc:
+        return False, str(exc)
+    if not available:
+        return False, CRONTAB_MISSING_MESSAGE
+    desired = build_auto_update_cron_line(settings)
+    kept = [line for line in lines if not is_auto_update_cron(line)]
+    updated = kept + ([desired] if desired else [])
+    if updated == lines:
+        return True, "crontab 无需改动"
+    ok, message = write_crontab_lines(updated)
+    if not ok:
+        return False, message
+    return True, ("已写入 crontab：每天 " + settings["time"] + " 自动更新") if desired else "已从 crontab 移除自动更新"
+
+
+def save_auto_update_settings(data):
+    updates, error_message = validate_auto_update_settings(data)
+    if error_message:
+        return False, error_message
+    write_env(updates)
+    ok, message = write_auto_update_cron(read_auto_update_settings())
+    if not ok:
+        return False, "设置已保存，但更新 crontab 失败：" + message
+    return True, "自动更新设置已保存。" + message
+
+
+def read_auto_update_state():
+    try:
+        with open(AUTO_UPDATE_STATE_FILE, "r", encoding="utf-8") as file:
+            state = json.load(file)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    for item in ("core", "panel"):
+        if not isinstance(state.get(item), dict):
+            state[item] = {}
+    return state
+
+
+def write_auto_update_state(state):
+    os.makedirs(os.path.dirname(AUTO_UPDATE_STATE_FILE), exist_ok=True)
+    tmp_file = f"{AUTO_UPDATE_STATE_FILE}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
+    os.replace(tmp_file, AUTO_UPDATE_STATE_FILE)
+
+
+def update_auto_update_item(item, **fields):
+    state = read_auto_update_state()
+    state[item].update(fields)
+    write_auto_update_state(state)
+    return state
+
+
+def acquire_auto_update_lock():
+    """单实例锁（fcntl）：拿到返回 fd，已有实例在跑返回 None。进程退出时内核自动释放。"""
+    os.makedirs(os.path.dirname(AUTO_UPDATE_LOCK_FILE), exist_ok=True)
+    fd = os.open(AUTO_UPDATE_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def release_auto_update_lock(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def auto_update_running():
+    try:
+        fd = acquire_auto_update_lock()
+    except OSError:
+        return False
+    if fd is None:
+        return True
+    release_auto_update_lock(fd)
+    return False
+
+
+def finish_panel_auto_update():
+    """面板启动时确认自动更新是否装上了：状态里是"started → vX"，现在跑的版本 ≥ vX 就记为 updated。"""
+    state = read_auto_update_state()
+    panel = state["panel"]
+    if panel.get("last_result") != "started":
+        return False
+    target = panel_version_tuple(panel.get("to"))
+    current = panel_version_tuple(PANEL_VERSION)
+    now = int(time.time())
+    if target and current and current >= target:
+        update_auto_update_item(
+            "panel",
+            last_result="updated",
+            last_result_at=now,
+            current=PANEL_VERSION,
+            message=f"面板已重启，当前运行 v{PANEL_VERSION}",
+        )
+        return True
+    if auto_update_running():
+        # 还在下载/安装中，面板因为别的原因重启了：交给自动更新进程自己收尾
+        return False
+    update_auto_update_item(
+        "panel",
+        last_result="failed",
+        last_result_at=now,
+        current=PANEL_VERSION,
+        message=f"面板重启后仍是 v{PANEL_VERSION}，预期 {panel.get('to') or '新版本'}",
+    )
+    return True
+
+
+def panel_startup_tasks():
+    # 只在 mosdns-web 真正启动时调用（__main__），import（auto_update.py、测试）时不碰 crontab
+    for task in (finish_panel_auto_update, write_auto_update_cron):
+        try:
+            task()
+        except Exception as exc:
+            print(f"启动任务 {task.__name__} 失败：{exc}", file=sys.stderr)
+
+
+def auto_update_overview():
+    settings = read_auto_update_settings()
+    lines, cron_available = read_crontab_state()
+    cron_line = next((line for line in lines if is_auto_update_cron(line) and not line.strip().startswith("#")), "")
+    return {
+        "settings": settings,
+        "state": read_auto_update_state(),
+        "running": auto_update_running(),
+        "cron_line": cron_line,
+        "cron_available": cron_available,
+        "cron_service_active": cron_service_active(),
+        "core_current": clean_version(get_version()),
+        "panel_current": PANEL_VERSION,
+        "log_tail": tail_lines(read_tail_text(AUTO_UPDATE_LOG, 16 * 1024), 30),
+        **server_time_info(),
+    }
+
+
+def run_auto_update_dry_run():
+    if auto_update_running():
+        return False, "自动更新正在运行，请稍后再检查"
+    if not os.path.exists(AUTO_UPDATE_SCRIPT):
+        return False, f"缺少 {AUTO_UPDATE_SCRIPT}，请先升级面板"
+    try:
+        result = subprocess.run(
+            [sys.executable or "python3", AUTO_UPDATE_SCRIPT, "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=AUTO_UPDATE_DRY_RUN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"检查超过 {AUTO_UPDATE_DRY_RUN_TIMEOUT} 秒未完成，已中止"
+    except Exception as exc:
+        return False, str(exc)
+    output = clean_output((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode in (0, 1), output or "检查完成，没有输出"
+
+
+def start_auto_update_detached():
+    """"立即更新"：在后台单独起一个进程跑 auto_update.py，页面轮询状态。
+
+    优先用 systemd-run 放进独立的临时 unit：面板升级会重启 mosdns-web，
+    留在 mosdns-web 的 cgroup 里会被一起杀掉。KillMode=process：主进程退出后不杀它留下的
+    "sleep 1; systemctl restart mosdns-web"，否则面板文件换了 Web 却没重启。
+    """
+    if auto_update_running():
+        return False, "自动更新正在运行"
+    if not os.path.exists(AUTO_UPDATE_SCRIPT):
+        return False, f"缺少 {AUTO_UPDATE_SCRIPT}，请先升级面板"
+    command = [sys.executable or "python3", AUTO_UPDATE_SCRIPT, "--manual"]
+    if shutil.which("systemd-run"):
+        unit = f"mosctl-auto-update-{int(time.time())}"
+        ok, message = run_cmd(["systemd-run", "--quiet", "--collect", "--unit", unit, "--property=KillMode=process", *command], timeout=20)
+        if ok:
+            return True, "已在后台开始更新，可在本卡片查看进度"
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return False, "启动后台更新失败：" + str(exc)
+    return True, "已在后台开始更新，可在本卡片查看进度"
 
 
 def backup_keep_count():
@@ -2666,6 +3250,8 @@ def api_control():
     if action == "restore_default":
         ok, message = restore_default_template()
         return jsonify({"success": ok, "message": message})
+    if action in ("upgrade_core", "upgrade_panel") and auto_update_running():
+        return jsonify({"success": False, "message": "自动更新正在运行，请等它结束后再手动升级"})
     if action == "upgrade_core":
         ok, message = upgrade_mosdns_core()
         return jsonify({"success": ok, "message": message})
@@ -2789,6 +3375,32 @@ def api_geo_schedule():
     return jsonify({"success": ok, "message": message, **read_geo_schedule(), **geo_update_status()})
 
 
+@app.route("/api/auto-update", methods=["GET", "POST"])
+@login_required
+@operation_locked
+def api_auto_update():
+    if request.method == "GET":
+        return jsonify(auto_update_overview())
+    ok, message = save_auto_update_settings(json_body())
+    return jsonify({"success": ok, "message": message, **auto_update_overview()})
+
+
+@app.route("/api/auto-update/check", methods=["POST"])
+@login_required
+@operation_locked
+def api_auto_update_check():
+    ok, report = run_auto_update_dry_run()
+    return jsonify({"success": ok, "message": report, **auto_update_overview()})
+
+
+@app.route("/api/auto-update/run", methods=["POST"])
+@login_required
+@operation_locked
+def api_auto_update_run():
+    ok, message = start_auto_update_detached()
+    return jsonify({"success": ok, "message": message, **auto_update_overview()})
+
+
 def sync_token_matches(provided, expected):
     if not expected or not isinstance(provided, str):
         return False
@@ -2898,6 +3510,7 @@ except Exception:
 
 
 if __name__ == "__main__":
+    panel_startup_tasks()
     env = read_env()
     try:
         port = int(env.get("WEB_PORT", "7840"))

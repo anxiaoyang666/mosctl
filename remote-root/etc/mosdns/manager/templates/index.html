@@ -1133,6 +1133,60 @@
               </div>
             </div>
           </section>
+
+          <section class="panel" id="autoUpdateCard">
+            <div class="panel-head">
+              <div>
+                <h3>自动更新</h3>
+                <div class="panel-note">每天定时检查 MosDNS 内核与 Mosctl 面板：内核先在沙盒校验、换后做健康检查，失败自动回滚；面板最后更新。</div>
+              </div>
+              <span class="pill" id="autoUpdateRunning">--</span>
+            </div>
+            <label class="check-row"><input id="autoUpdateEnabled" type="checkbox"> 启用自动更新</label>
+            <div class="field-grid">
+              <div class="field">
+                <div class="field-title">每天执行时间（服务器时间）</div>
+                <input id="autoUpdateTime" type="time" value="04:10" oninput="renderAutoUpdateTimeNote()">
+                <p class="hint" id="autoUpdateTimeNote" style="margin: 8px 0 0;">服务器时区：--</p>
+              </div>
+              <div class="field">
+                <div class="field-title">内核发布满几天才更新</div>
+                <input id="autoUpdateCoreMinAge" inputmode="numeric" value="3">
+                <p class="hint" style="margin: 8px 0 0;">只看官方稳定版，跳过预发布，绝不降级。</p>
+              </div>
+              <div class="field">
+                <div class="field-title">面板提交满几天才更新</div>
+                <input id="autoUpdatePanelMinAge" inputmode="numeric" value="0">
+                <p class="hint" style="margin: 8px 0 0;">按分支上最近一次改动 remote-root/ 的提交时间；0 表示不等待。</p>
+              </div>
+            </div>
+            <p class="hint warn" id="autoUpdateCronWarning" hidden></p>
+            <div class="risk-action">
+              <div class="action-row">
+                <div>
+                  <div class="action-title">MosDNS 内核</div>
+                  <div class="hint" id="autoUpdateCoreVersions">当前：--，可更新到：--</div>
+                  <div class="action-desc" id="autoUpdateCoreResult" style="white-space: pre-wrap;">上次结果：--</div>
+                </div>
+              </div>
+              <div class="action-row">
+                <div>
+                  <div class="action-title">Mosctl 面板</div>
+                  <div class="hint" id="autoUpdatePanelVersions">当前：--，可更新到：--</div>
+                  <div class="action-desc" id="autoUpdatePanelResult" style="white-space: pre-wrap;">上次结果：--</div>
+                </div>
+              </div>
+            </div>
+            <div class="actions" style="margin-top: 10px;">
+              <button type="button" class="primary" onclick="saveAutoUpdate()">保存设置</button>
+              <button type="button" onclick="checkAutoUpdate()">立即检查（不安装）</button>
+              <button type="button" class="soft-danger" onclick="confirmRunAutoUpdate()">立即更新</button>
+            </div>
+            <details id="autoUpdateLogDetails">
+              <summary class="hint" style="cursor: pointer;">最近的自动更新日志</summary>
+              <pre class="example-box" id="autoUpdateLog"></pre>
+            </details>
+          </section>
         </div>
       </section>
 
@@ -1400,7 +1454,7 @@
       history.replaceState(null, '', '#' + name);
       if (name === 'overview') loadDashboardLogs();
       if (name === 'policy') { loadSettings(); loadRule(); }
-      if (name === 'operations') { loadBackups(); loadBackupSettings(); loadSyncSettings(); loadGeoSchedule(); loadPanelUpgradeSource(); }
+      if (name === 'operations') { loadBackups(); loadBackupSettings(); loadSyncSettings(); loadGeoSchedule(); loadAutoUpdate(); loadPanelUpgradeSource(); }
       if (name === 'advanced') { loadAccountSettings(); loadConfig(); }
     }
 
@@ -1955,6 +2009,158 @@
       }
     }
 
+    const AUTO_UPDATE_RESULT_LABELS = {
+      updated: '已更新',
+      up_to_date: '已是最新',
+      skipped: '跳过',
+      failed: '失败',
+      rolled_back: '已回滚',
+      started: '已安装，等待面板重启确认'
+    };
+    let autoUpdateInfo = null;
+    let autoUpdatePollTimer = null;
+    let autoUpdatePollUntil = 0;
+
+    // 服务器时间 HH:MM → 浏览器本地时间：先按服务器 UTC 偏移换成 UTC，再按浏览器偏移换回本地
+    function serverTimeToBrowserLocal(value, serverOffset) {
+      const match = /^(\d{2}):(\d{2})$/.exec(value || '');
+      if (!match) return '--:--';
+      const utcMinutes = Number(match[1]) * 60 + Number(match[2]) - Math.round(Number(serverOffset || 0) / 60);
+      const localMinutes = ((utcMinutes - new Date().getTimezoneOffset()) % 1440 + 1440) % 1440;
+      const pad = n => String(n).padStart(2, '0');
+      return pad(Math.floor(localMinutes / 60)) + ':' + pad(localMinutes % 60);
+    }
+
+    function renderAutoUpdateTimeNote() {
+      const info = autoUpdateInfo || {};
+      const value = $('autoUpdateTime').value;
+      $('autoUpdateTimeNote').textContent = '服务器时区：' + (info.server_tz || '未知')
+        + '，服务器当前 ' + formatServerClock(info.server_time, info.server_utc_offset)
+        + '；' + (value || '--:--') + ' 相当于浏览器本地 ' + serverTimeToBrowserLocal(value, info.server_utc_offset);
+    }
+
+    function describeAutoUpdateItem(item) {
+      const data = item || {};
+      let text = '上次结果：' + (AUTO_UPDATE_RESULT_LABELS[data.last_result] || '还没有记录');
+      if (data.last_result_at) text += '（' + formatTime(data.last_result_at) + '）';
+      if (data.from && data.to && data.from !== data.to) text += ' ' + data.from + ' → ' + data.to;
+      if (data.message) text += '\n' + data.message;
+      if (data.last_check) text += '\n上次检查：' + formatTime(data.last_check) + (data.note ? '，' + data.note : '');
+      return text;
+    }
+
+    function renderAutoUpdate(res) {
+      autoUpdateInfo = res || {};
+      const settings = autoUpdateInfo.settings || {};
+      const state = autoUpdateInfo.state || {};
+      const core = state.core || {};
+      const panel = state.panel || {};
+      // 轮询时不覆盖用户正在编辑的输入框
+      if (!$('autoUpdateCard').contains(document.activeElement)) {
+        $('autoUpdateEnabled').checked = settings.enabled !== false;
+        $('autoUpdateTime').value = settings.time || '04:10';
+        $('autoUpdateCoreMinAge').value = settings.core_min_age_days ?? 3;
+        $('autoUpdatePanelMinAge').value = settings.panel_min_age_days ?? 0;
+      }
+      renderAutoUpdateTimeNote();
+      $('autoUpdateRunning').textContent = autoUpdateInfo.running ? '运行中' : (settings.enabled === false ? '已关闭' : '已开启');
+      $('autoUpdateCoreVersions').textContent = '当前：' + (autoUpdateInfo.core_current || '--')
+        + '，可更新到：' + (core.latest_eligible || '无') + (core.latest ? '，最新稳定版：' + core.latest : '');
+      $('autoUpdatePanelVersions').textContent = '当前：v' + (autoUpdateInfo.panel_current || '--')
+        + '，可更新到：' + (panel.latest_eligible || '无') + (panel.latest ? '，远端：' + panel.latest : '');
+      $('autoUpdateCoreResult').textContent = describeAutoUpdateItem(core);
+      $('autoUpdatePanelResult').textContent = describeAutoUpdateItem(panel);
+      const warnings = [];
+      if (autoUpdateInfo.cron_available === false) warnings.push('系统没有 crontab 命令，自动更新不会执行，请先安装 cron。');
+      if (autoUpdateInfo.cron_available !== false && autoUpdateInfo.cron_service_active === false) warnings.push('cron 服务没有运行，自动更新不会执行。');
+      if (settings.enabled !== false && autoUpdateInfo.cron_available !== false && !autoUpdateInfo.cron_line) warnings.push('crontab 里还没有自动更新任务，保存一次设置即可写入。');
+      $('autoUpdateCronWarning').textContent = warnings.join(' ');
+      $('autoUpdateCronWarning').hidden = !warnings.length;
+      $('autoUpdateLog').textContent = autoUpdateInfo.log_tail || '（还没有日志）';
+    }
+
+    async function loadAutoUpdate() {
+      const res = await api('/api/auto-update', {silent: true});
+      if (!Object.keys(res || {}).length) return null;
+      renderAutoUpdate(res);
+      return res;
+    }
+
+    function autoUpdatePayload() {
+      return {
+        enabled: $('autoUpdateEnabled').checked,
+        time: $('autoUpdateTime').value,
+        core_min_age_days: $('autoUpdateCoreMinAge').value.trim(),
+        panel_min_age_days: $('autoUpdatePanelMinAge').value.trim()
+      };
+    }
+
+    async function saveAutoUpdate() {
+      if (busy) return;
+      setBusy(true, '正在保存自动更新设置...');
+      try {
+        const res = await api('/api/auto-update', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(autoUpdatePayload())
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        renderAutoUpdate(res);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function checkAutoUpdate() {
+      if (busy) return;
+      setBusy(true, '正在检查可用更新（不会安装），最多约 2 分钟...');
+      try {
+        const res = await api('/api/auto-update/check', {method: 'POST'});
+        $('commandOutput').textContent = res.message || '';
+        toast(res.success ? '检查完成（未安装）' : '检查失败', res.message || '');
+        renderAutoUpdate(res);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function confirmRunAutoUpdate() {
+      if (!confirm('立即按自动更新规则检查并安装：\n- 内核更新会重启 mosdns，DNS 会中断 1–2 秒；健康检查不通过会自动回滚旧内核。\n- 面板更新完成后 Web 服务会重启。\n更新在后台进行，本卡片会显示进度。确定继续吗？')) return;
+      runAutoUpdate();
+    }
+
+    async function runAutoUpdate() {
+      if (busy) return;
+      setBusy(true, '正在启动后台更新...');
+      try {
+        const res = await api('/api/auto-update/run', {method: 'POST'});
+        toast(res.success ? '已开始' : '启动失败', res.message || '');
+        renderAutoUpdate(res);
+        if (res.success) startAutoUpdatePolling();
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    // 后台进程刚起来时可能还没拿到锁（running 仍是 false），所以至少轮询 20 秒，之后只要还在运行就继续；
+    // 面板升级会重启 Web 服务，期间请求失败（silent 返回 null）不算结束
+    function startAutoUpdatePolling() {
+      autoUpdatePollUntil = Date.now() + 20000;
+      if (autoUpdatePollTimer) clearInterval(autoUpdatePollTimer);
+      autoUpdatePollTimer = setInterval(async () => {
+        const res = await loadAutoUpdate().catch(() => null);
+        if (!res) return;
+        const panelPending = res.state && res.state.panel && res.state.panel.last_result === 'started';
+        const waitingTooLong = Date.now() > autoUpdatePollUntil + 15 * 60 * 1000;
+        if ((!res.running && !panelPending && Date.now() > autoUpdatePollUntil) || waitingTooLong) {
+          clearInterval(autoUpdatePollTimer);
+          autoUpdatePollTimer = null;
+          await loadStatus();
+          toast('自动更新结束', $('autoUpdateCoreResult').textContent + '\n\n' + $('autoUpdatePanelResult').textContent);
+        }
+      }, 3000);
+    }
+
     async function loadConfig() {
       const res = await api('/api/config');
       $('configContent').value = res.content || '';
@@ -2129,6 +2335,8 @@
         await loadBackupSettings();
         await loadSyncSettings();
         await loadGeoSchedule();
+        const autoUpdate = await loadAutoUpdate();
+        if (autoUpdate && autoUpdate.running) startAutoUpdatePolling();
       }
       if (activeView === 'advanced') {
         await loadAccountSettings();

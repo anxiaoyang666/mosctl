@@ -51,6 +51,14 @@ WEB_PORT=7840 WEB_USER=admin WEB_SECRET='your-password' bash -c "$(curl -fsSL ht
 - `RULE_SYNC_TOKEN`：`/api/rule-sync` 校验用的共享密钥
 - `RULE_SYNC_PEERS`：其他 mosctl / mihomo 面板地址，用 `|` 分隔
 - `BACKUP_KEEP_COUNT`：配置备份保留数量（3–200），默认 `20`
+- `AUTO_UPDATE_ENABLED`：`true` / `false`，每天自动更新 mosdns 内核和面板，默认 `true`
+- `AUTO_UPDATE_TIME`：自动更新时间（服务器本地时间，`HH:MM`），默认 `04:10`
+- `AUTO_UPDATE_CORE_MIN_AGE_DAYS`：mosdns 稳定版发布满几天才自动更新（0–365），默认 `3`
+- `AUTO_UPDATE_PANEL_MIN_AGE_DAYS`：面板分支上改动 `remote-root/` 的最新提交满几天才自动更新（0–365），默认 `0`
+
+## 自动更新
+
+面板启动和保存设置时会在 crontab 写入一行带 `# MOSCTL_AUTO_UPDATE` 标记的任务，按 `AUTO_UPDATE_TIME` 运行 `python3 /etc/mosdns/manager/auto_update.py`（可加 `--dry-run`、`--only core|panel`）。每次先更新内核、最后更新面板：内核只装发布满指定天数的稳定版、绝不降级，替换前用新内核在沙盒里跑当前配置，替换后 20 秒内检查服务状态、版本以及国内 / 国外域名解析，不通过就自动回滚。结果写入 `/etc/mosdns/auto_update_state.json` 和 `/var/log/mosctl-auto-update.log`，在「运行维护 → 自动更新」查看。
 
 ## 规则同步
 

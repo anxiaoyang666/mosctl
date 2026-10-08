@@ -51,6 +51,14 @@ The installer writes `/etc/mosdns/.env` (mode `600`). The Web panel reads and up
 - `RULE_SYNC_TOKEN`: shared secret that `/api/rule-sync` checks
 - `RULE_SYNC_PEERS`: other mosctl / mihomo panel URLs, separated by `|`
 - `BACKUP_KEEP_COUNT`: number of config backups to keep (3–200), default `20`
+- `AUTO_UPDATE_ENABLED`: `true` / `false`, update the mosdns core and the panel automatically every day, default `true`
+- `AUTO_UPDATE_TIME`: daily auto-update time (server local time, `HH:MM`), default `04:10`
+- `AUTO_UPDATE_CORE_MIN_AGE_DAYS`: only install a stable mosdns release once it is at least this many days old (0–365), default `3`
+- `AUTO_UPDATE_PANEL_MIN_AGE_DAYS`: only update the panel once the newest commit touching `remote-root/` on the branch is at least this many days old (0–365), default `0`
+
+## Auto Update
+
+On startup and whenever its settings are saved, the panel keeps one crontab line tagged `# MOSCTL_AUTO_UPDATE` that runs `python3 /etc/mosdns/manager/auto_update.py` at `AUTO_UPDATE_TIME` (`--dry-run` and `--only core|panel` are available). Each run updates the core first and the panel last. The core only moves to stable releases old enough, never downgrades, is first started in a sandbox against the live config, and must pass a 20-second health check (service active, reported version, domestic and foreign lookups on 127.0.0.1:53) or the old binary is restored. Results go to `/etc/mosdns/auto_update_state.json` and `/var/log/mosctl-auto-update.log` and show up under 运行维护 → 自动更新.
 
 ## Rule Sync
 

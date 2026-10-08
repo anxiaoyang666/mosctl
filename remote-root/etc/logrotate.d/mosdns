@@ -1,0 +1,11 @@
+# mosdns 自己写 /var/log/mosdns.log（config.yaml 的 log.file），不会响应 SIGHUP 重新打开文件，
+# 所以用 copytruncate；mosctl-update.log 是定时任务的追加输出。
+/var/log/mosdns.log /var/log/mosctl-update.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

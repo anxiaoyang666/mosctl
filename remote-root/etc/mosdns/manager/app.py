@@ -49,11 +49,13 @@ MOSDNS_RELEASE_BASE = "https://github.com/IrineSistiana/mosdns/releases/latest/d
 MOSDNS_RELEASE_API = "https://api.github.com/repos/IrineSistiana/mosdns/releases/latest"
 GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
+# 定时任务输出写到这里，不然跑没跑、成没成功都看不到
+UPDATE_LOG = "/var/log/mosctl-update.log"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.28"
+PANEL_VERSION = "0.3.29"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -979,6 +981,35 @@ def github_url_candidates(url):
 ensure_env()
 
 
+def migrate_cron_logging():
+    """老版本写的 `mosctl update > /dev/null 2>&1` 改成写日志；没有需要改的就不碰 crontab。"""
+    try:
+        lines = read_crontab_lines()
+    except Exception:
+        return False
+    changed = False
+    updated = []
+    for line in lines:
+        if is_geo_update_cron(line) and "> /dev/null" in line:
+            line = re.sub(r"\s*>\s*/dev/null\s+2>&1\s*$", f" >> {UPDATE_LOG} 2>&1", line)
+            changed = True
+        updated.append(line)
+    if not changed:
+        return False
+    text = "\n".join(updated).strip() + "\n"
+    try:
+        subprocess.run(["crontab", "-"], input=text, capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    return True
+
+
+try:
+    migrate_cron_logging()
+except Exception:
+    pass
+
+
 @app.before_request
 def require_ajax_header_for_api_writes():
     # 浏览器表单/跨站请求带不上自定义头，用它挡住 CSRF。
@@ -1586,6 +1617,7 @@ def panel_managed_targets():
         (f"{SYSTEMD_DIR}/mosdns-rescue.service", "etc/systemd/system/mosdns-rescue.service", "file", 0o644),
         (f"{SYSTEMD_DIR}/mosdns-web.service", "etc/systemd/system/mosdns-web.service", "file", 0o644),
         ("/etc/sysctl.d/99-mosdns.conf", "etc/sysctl.d/99-mosdns.conf", "file", 0o644),
+        ("/etc/logrotate.d/mosdns", "etc/logrotate.d/mosdns", "file", 0o644),
     ]
 
 
@@ -2145,7 +2177,7 @@ def build_geo_cron_line(data):
         weekday_field = "*"
     else:
         raise ValueError("更新频率不合法")
-    cron_line = f"{minute} {hour_field} * * {weekday_field} {GEO_UPDATE_COMMAND} > /dev/null 2>&1"
+    cron_line = f"{minute} {hour_field} * * {weekday_field} {GEO_UPDATE_COMMAND} >> {UPDATE_LOG} 2>&1"
     return cron_line, mode, f"{hour:02d}:{minute:02d}", weekday
 
 

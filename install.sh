@@ -159,6 +159,10 @@ copy_payload() {
     fi
   fi
 
+  if [ -f "$payload/etc/logrotate.d/mosdns" ]; then
+    mkdir -p /etc/logrotate.d
+    install -m 0644 "$payload/etc/logrotate.d/mosdns" /etc/logrotate.d/mosdns
+  fi
   if [ -d "$payload/etc/mosdns/rules" ]; then
     cp -a "$payload/etc/mosdns/rules/." "$INSTALL_DIR/rules/"
     rm -f "$INSTALL_DIR"/rules/*.save "$INSTALL_DIR"/rules/*.save.*

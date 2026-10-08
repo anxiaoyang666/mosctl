@@ -398,19 +398,22 @@ rules_menu() {
     echo "  1. 🏠 自定义 Hosts"
     echo "  2. 🇨🇳 强制走国内 (域名)"
     echo "  3. 🌍 强制走国外 (域名)"
-    echo "  4. 🔌 智能家居直连 (源IP/网段)"
     if [ -t 0 ]; then read -p "请选择: " sub_choice; else echo -n "请选择: "; read sub_choice < /dev/tty; fi
     case "$sub_choice" in
         1) edit_rule "/etc/mosdns/rules/hosts.txt" ;;
         2) edit_rule "/etc/mosdns/rules/force-cn.txt" ;;
         3) edit_rule "/etc/mosdns/rules/force-nocn.txt" ;;
-        4) edit_rule "/etc/mosdns/rules/user_iot.txt" ;;
     esac
 }
 
 update_geo_rules() {
-    echo -e "${YELLOW}⬇️  正在更新 GeoSite/GeoIP...${PLAIN}"
+    echo "===== $(date '+%F %T') 更新 Geo 规则 ====="
+    echo -e "${YELLOW}⬇️  正在更新 GeoSite...${PLAIN}"
     mkdir -p /etc/mosdns/rules
+    # 旧版本会下载 geoip_cn / geosite_apple 并带着 user_iot / local-ptr，但配置从未引用它们；顺手清掉
+    rm -f /etc/mosdns/rules/geoip_cn.txt /etc/mosdns/rules/geosite_apple.txt \
+          /etc/mosdns/rules/user_iot.txt /etc/mosdns/rules/local-ptr.txt \
+          /etc/mosdns/rules/*.save /etc/mosdns/rules/*.save.*
     dl() {
         local target="$1"
         local source="$2"
@@ -425,9 +428,8 @@ update_geo_rules() {
             return 1
         fi
     }
+    # 只下载 config.yaml 实际引用的两个列表
     dl "/etc/mosdns/rules/geosite_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt" || return 1
-    dl "/etc/mosdns/rules/geoip_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/cn.txt" || return 1
-    dl "/etc/mosdns/rules/geosite_apple.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt" || return 1
     dl "/etc/mosdns/rules/geosite_no_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt" || return 1
     systemctl restart mosdns
     echo -e "${GREEN}✅ 规则更新完毕！${PLAIN}"
@@ -455,12 +457,13 @@ uninstall_mosdns() {
         rm -f /etc/systemd/system/mosdns-rescue.service
         rm -f /etc/systemd/system/mosdns-web.service
         rm -f /etc/sysctl.d/99-mosdns.conf
+        rm -f /etc/logrotate.d/mosdns
         systemctl daemon-reload
         
         rm -rf /etc/mosdns
         rm -f /usr/local/bin/mosdns
         rm -f /usr/local/bin/mosdns-web
-        rm -f /var/log/mosdns.log
+        rm -f /var/log/mosdns.log /var/log/mosctl-update.log
         
         crontab -l 2>/dev/null | grep -v "mosctl update" | crontab -
 

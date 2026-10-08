@@ -47,8 +47,6 @@ The installer writes `/etc/mosdns/.env` (mode `600`). The Web panel reads and up
 - `MOSCTL_REPO_URL`: repository used by the panel upgrade and `mosctl sync`
 - `MOSCTL_BRANCH`: branch used by the panel upgrade and `mosctl sync`, default `main`
 - `GH_PROXY`: GitHub proxy prefix tried only after a direct GitHub download fails; set it to an empty string to never use a proxy
-- `MIHOMO_CONTROLLER`: mihomo external controller address for the device traffic view, default `http://127.0.0.1:9090`
-- `MIHOMO_API_SECRET`: mihomo controller secret, leave empty if the controller has none
 - `RULE_SYNC_ENABLED`: `true` / `false`, push force-cn / force-nocn rule changes to other panels
 - `RULE_SYNC_TOKEN`: shared secret that `/api/rule-sync` checks
 - `RULE_SYNC_PEERS`: other mosctl / mihomo panel URLs, separated by `|`

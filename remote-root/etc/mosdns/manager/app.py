@@ -16,7 +16,7 @@ import json
 import stat
 import tempfile
 import zipfile
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit
 
 from flask import Flask, jsonify, redirect, render_template, request, session
 
@@ -27,7 +27,6 @@ CONFIG_FILE = f"{MOSDNS_DIR}/config.yaml"
 DEFAULT_TEMPLATE_FILE = f"{MOSDNS_DIR}/templates/default.yaml"
 BACKUP_DIR = f"{MOSDNS_DIR}/backup"
 LOG_FILE = "/var/log/mosdns.log"
-DEVICE_NOTES_FILE = f"{MOSDNS_DIR}/device-notes.json"
 MANAGER_DIR = f"{MOSDNS_DIR}/manager"
 MOSCTL = "/usr/local/bin/mosctl"
 MOSDNS_BIN = "/usr/local/bin/mosdns"
@@ -55,12 +54,10 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.30"
+PANEL_VERSION = "0.3.31"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
-# 设备页只展示每台设备最常查询的前 N 个域名；归因时仍使用全部域名
-DEVICE_DOMAIN_DISPLAY_LIMIT = 12
 # 下载上限：内核 zip 约 5 MB、面板源码 zip 约 2 MB，100 MB 足够且能挡住异常响应
 DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
 DOWNLOAD_TIME_BUDGET = 300
@@ -82,7 +79,7 @@ RULE_FILES = {
         "label": "强制国内",
         "path": f"{MOSDNS_DIR}/rules/force-cn.txt",
         "summary": "命中的域名强制走国内上游 DNS，适合国内站点被误判到国外时使用。",
-        "format": "每行一个域名。通常写主域名即可。",
+        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配）。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀。",
         "examples": [
             "# 这些域名强制走国内 DNS",
             "example.cn",
@@ -94,7 +91,7 @@ RULE_FILES = {
         "label": "强制国外",
         "path": f"{MOSDNS_DIR}/rules/force-nocn.txt",
         "summary": "命中的域名强制走国外上游 DNS，适合海外服务解析不准或被污染时使用。",
-        "format": "每行一个域名。通常写主域名即可。",
+        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配）。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀。",
         "examples": [
             "# 这些域名强制走国外 DNS",
             "openai.com",
@@ -106,11 +103,13 @@ RULE_FILES = {
         "label": "自定义 Hosts",
         "path": f"{MOSDNS_DIR}/rules/hosts.txt",
         "summary": "把指定域名固定解析到指定 IP，适合内网域名、NAS、路由器、服务别名。",
-        "format": "每行一个：域名 IP。可以用 # 写注释。",
+        "format": "每行一个：域名 IP（可跟多个 IP，用空格分开）。默认精确匹配，只命中写出的这个域名本身；要连同子域名一起命中请加 domain: 前缀。可以用 # 写注释。",
         "examples": [
             "# nas.lan 固定到 NAS",
             "nas.lan 10.10.30.10",
             "router.lan 10.10.30.1",
+            "# 带 domain: 前缀时 home.lan 和 *.home.lan 都命中",
+            "domain:home.lan 10.10.30.1",
         ],
     },
 }
@@ -152,6 +151,8 @@ def clean_output(text):
 
 
 def normalize_log_timestamps(text):
+    # 时间戳统一成带时区偏移的 ISO-8601（去掉小数秒），由浏览器按本地时区显示；
+    # 后端不再转成服务器本地时间，否则面板和服务器时区不同时会看错
     lines = []
     for line in (text or "").splitlines():
         match = LOG_TIMESTAMP_RE.match(line)
@@ -162,8 +163,8 @@ def normalize_log_timestamps(text):
             timestamp = match.group(1).replace("Z", "+00:00")
             if re.search(r"[+-]\d{4}$", timestamp):
                 timestamp = timestamp[:-2] + ":" + timestamp[-2:]
-            local_time = datetime.fromisoformat(timestamp).astimezone()
-            lines.append(local_time.strftime("%Y-%m-%d %H:%M:%S") + match.group(2))
+            parsed = datetime.fromisoformat(timestamp)
+            lines.append(parsed.replace(microsecond=0).isoformat() + match.group(2))
         except ValueError:
             lines.append(line)
     return "\n".join(lines)
@@ -263,604 +264,6 @@ def run_cmd(args, timeout=60):
         return result.returncode == 0, clean_output(result.stdout + result.stderr)
     except Exception as exc:
         return False, str(exc)
-
-
-def read_json_file(path, default):
-    if not os.path.exists(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as file:
-            data = json.load(file)
-        return data if isinstance(data, type(default)) else default
-    except (OSError, ValueError):
-        return default
-
-
-def write_json_file(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_file = f"{path}.webtmp"
-    with open(tmp_file, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
-    os.replace(tmp_file, path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
-
-def read_device_notes():
-    notes = read_json_file(DEVICE_NOTES_FILE, {})
-    return {normalize_client_ip(ip): str(note) for ip, note in notes.items() if normalize_client_ip(ip)}
-
-
-def write_device_note(device_ip, note):
-    ip = normalize_client_ip(device_ip)
-    if not ip:
-        return False, "设备 IP 不合法"
-    note = str(note or "").strip()
-    if not is_safe_text(note, 80):
-        return False, "备注内容不合法或过长"
-    notes = read_device_notes()
-    if note:
-        notes[ip] = note
-    else:
-        notes.pop(ip, None)
-    write_json_file(DEVICE_NOTES_FILE, notes)
-    return True, "备注已保存"
-
-
-def localize_wildcard_host(url):
-    # 控制器监听在 0.0.0.0 / [::] 时本机要用回环地址访问。只比较 hostname，
-    # 不能对整个 URL 做字符串替换，否则 10.0.0.0 这类地址会被改坏
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-    if parts.hostname not in ("0.0.0.0", "::"):
-        return url
-    netloc = "127.0.0.1"
-    if parts.port is not None:
-        netloc += f":{parts.port}"
-    if parts.username:
-        auth = parts.username + (f":{parts.password}" if parts.password else "")
-        netloc = f"{auth}@{netloc}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
-
-def mihomo_controller_settings():
-    env = read_env()
-    controller = env.get("MIHOMO_CONTROLLER") or env.get("MIHOMO_CONTROLLER_URL") or "127.0.0.1:9090"
-    controller = str(controller).strip().strip('"').strip("'")
-    if controller.startswith(":"):
-        controller = "127.0.0.1" + controller
-    if "://" not in controller:
-        controller = "http://" + controller
-    controller = localize_wildcard_host(controller)
-    secret = env.get("MIHOMO_API_SECRET") or env.get("MIHOMO_SECRET") or ""
-    return {"base_url": controller.rstrip("/"), "secret": secret}
-
-
-def read_mihomo_settings():
-    settings = mihomo_controller_settings()
-    return {
-        "controller": settings["base_url"],
-        "secret_set": bool(settings.get("secret")),
-    }
-
-
-def write_mihomo_settings(data):
-    controller = str(data.get("controller") or "").strip().strip('"').strip("'")
-    secret = str(data.get("secret") or "").strip()
-    if not controller:
-        controller = "127.0.0.1:9090"
-    if not is_safe_text(controller, 300) or env_value_error(controller):
-        return False, "mihomo 控制器地址不合法"
-    if secret and (not is_safe_text(secret, 300) or env_value_error(secret)):
-        return False, "mihomo 密钥不合法"
-    if "://" not in controller:
-        controller = "http://" + controller
-    updates = {"MIHOMO_CONTROLLER": controller.rstrip("/")}
-    if secret or data.get("clear_secret"):
-        updates["MIHOMO_API_SECRET"] = secret
-    write_env(updates)
-    return True, "mihomo 控制器设置已保存"
-
-
-def mihomo_api_get(path, timeout=2):
-    settings = mihomo_controller_settings()
-    headers = {"User-Agent": "mosctl-web-manager"}
-    if settings.get("secret"):
-        headers["Authorization"] = "Bearer " + settings["secret"]
-    try:
-        req = urlrequest.Request(settings["base_url"] + path, headers=headers)
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
-            return True, json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception as exc:
-        return False, {"error": str(exc)}
-
-
-def first_number(value):
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def normalize_connection_ip(value):
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    raw = raw.split("%", 1)[0]
-    ip = normalize_client_ip(raw)
-    if ip:
-        return ip
-    match = re.search(r"(?:\d{1,3}\.){3}\d{1,3}", raw)
-    if match:
-        return normalize_client_ip(match.group(0))
-    return ""
-
-
-def connection_source_ip(connection):
-    # 只看真正表示来源地址的字段。metadata.host 是目标域名、inboundIp 是
-    # 入站监听地址，对它们跑 IPv4 正则会把目标/网关地址当成来源设备
-    if not isinstance(connection, dict):
-        return ""
-    metadata = connection.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-    candidates = [
-        connection.get("sourceIP"),
-        connection.get("sourceIp"),
-        connection.get("source_ip"),
-        connection.get("sourceAddr"),
-        connection.get("sourceAddress"),
-        connection.get("clientIP"),
-        connection.get("clientIp"),
-        connection.get("client_ip"),
-        connection.get("client"),
-        connection.get("source"),
-        connection.get("addr"),
-        metadata.get("sourceIP"),
-        metadata.get("sourceIp"),
-        metadata.get("sourceIPAddr"),
-        metadata.get("sourceAddr"),
-        metadata.get("sourceAddress"),
-        metadata.get("clientIP"),
-        metadata.get("clientIp"),
-        metadata.get("client_ip"),
-        metadata.get("client"),
-    ]
-    for candidate in candidates:
-        ip = normalize_connection_ip(candidate)
-        if ip:
-            return ip
-    return ""
-
-
-def normalize_domain(value):
-    domain = str(value or "").strip().strip(".").lower()
-    if not domain:
-        return ""
-    if "/" in domain:
-        domain = domain.split("/", 1)[0]
-    if ":" in domain and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", domain):
-        domain = domain.split(":", 1)[0]
-    if normalize_client_ip(domain):
-        return ""
-    return domain if re.fullmatch(r"[a-z0-9_.-]+", domain) and "." in domain else ""
-
-
-def connection_target_domain(connection):
-    metadata = connection.get("metadata") if isinstance(connection, dict) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    candidates = [
-        metadata.get("host"),
-        metadata.get("sniffHost"),
-        metadata.get("destinationHost"),
-        metadata.get("remoteDestination"),
-        metadata.get("destinationIP"),
-        metadata.get("dnsMode"),
-        connection.get("host"),
-        connection.get("destination"),
-        connection.get("remoteDestination"),
-    ]
-    for candidate in candidates:
-        domain = normalize_domain(candidate)
-        if domain:
-            return domain
-    chains = connection.get("chains") if isinstance(connection, dict) else []
-    if isinstance(chains, list):
-        for candidate in chains:
-            domain = normalize_domain(candidate)
-            if domain:
-                return domain
-    return ""
-
-
-def device_traffic_status(ok, data, matched_connections, source_counts=None):
-    settings = mihomo_controller_settings()
-    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
-    source_counts = source_counts or {}
-    dominant_source_ip = ""
-    dominant_source_count = 0
-    if source_counts:
-        dominant_source_ip, dominant_source_count = max(source_counts.items(), key=lambda item: item[1])
-    source_ip_collapsed = bool(dominant_source_ip and len(connections) >= 3 and dominant_source_count / max(1, len(connections)) >= 0.8)
-    return {
-        "controller": settings["base_url"],
-        "reachable": bool(ok),
-        "error": "" if ok else data.get("error", "mihomo 控制器不可用"),
-        "connections": len(connections) if ok else 0,
-        "matched_connections": matched_connections,
-        "attributed_connections": 0,
-        "dominant_source_ip": dominant_source_ip,
-        "dominant_source_count": dominant_source_count,
-        "source_ip_collapsed": source_ip_collapsed,
-    }
-
-
-def collect_mihomo_device_traffic():
-    ok, data = mihomo_api_get("/connections")
-    traffic = {}
-    if not ok:
-        return traffic, device_traffic_status(False, data, 0), []
-    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
-    matched_connections = 0
-    source_counts = {}
-    for connection in connections:
-        ip = connection_source_ip(connection)
-        if not ip:
-            continue
-        matched_connections += 1
-        source_counts[ip] = source_counts.get(ip, 0) + 1
-        item = traffic.setdefault(ip, {"traffic_download": 0, "traffic_upload": 0, "connections": 0})
-        item["traffic_download"] += first_number(connection.get("download"))
-        item["traffic_upload"] += first_number(connection.get("upload"))
-        item["connections"] += 1
-    for item in traffic.values():
-        item["traffic_total"] = item["traffic_download"] + item["traffic_upload"]
-    return traffic, device_traffic_status(True, data, matched_connections, source_counts), connections
-
-
-def domain_suffixes(domain):
-    domain = normalize_domain(domain)
-    if not domain:
-        return []
-    parts = domain.split(".")
-    return [".".join(parts[index:]) for index in range(len(parts))]
-
-
-def device_domain_index(devices_by_ip):
-    index = {}
-    for ip, item in devices_by_ip.items():
-        for domain_item in item.get("domains", []):
-            domain = normalize_domain(domain_item.get("domain", ""))
-            if not domain:
-                continue
-            index.setdefault(domain, set()).add(ip)
-    return index
-
-
-def apply_domain_attributed_traffic(devices_by_ip, connections, known_source_ips):
-    index = device_domain_index(devices_by_ip)
-    attributed_connections = 0
-    for connection in connections:
-        source_ip = connection_source_ip(connection)
-        if source_ip not in known_source_ips:
-            continue
-        source_item = devices_by_ip.get(source_ip, {})
-        if int(source_item.get("query_count") or 0) or int(source_item.get("domain_count") or 0):
-            continue
-        target_domain = connection_target_domain(connection)
-        if not target_domain:
-            continue
-        candidate_ips = set()
-        for suffix in domain_suffixes(target_domain):
-            candidate_ips.update(index.get(suffix, set()))
-        if len(candidate_ips) != 1:
-            continue
-        target_ip = next(iter(candidate_ips))
-        if target_ip == source_ip:
-            continue
-        download = first_number(connection.get("download"))
-        upload = first_number(connection.get("upload"))
-        item = devices_by_ip.setdefault(
-            target_ip,
-            {
-                "ip": target_ip,
-                "last_seen": "",
-                "last_query": "",
-                "query_count": 0,
-                "domain_count": 0,
-                "domains": [],
-            },
-        )
-        item["traffic_download"] = int(item.get("traffic_download") or 0) + download
-        item["traffic_upload"] = int(item.get("traffic_upload") or 0) + upload
-        item["connections"] = int(item.get("connections") or 0) + 1
-        item["traffic_total"] = int(item.get("traffic_download") or 0) + int(item.get("traffic_upload") or 0)
-        item["traffic_estimated"] = True
-        # 这条连接的流量已经算到目标设备头上，从网关来源里扣掉，避免总量翻倍
-        if source_item:
-            source_item["traffic_download"] = max(0, int(source_item.get("traffic_download") or 0) - download)
-            source_item["traffic_upload"] = max(0, int(source_item.get("traffic_upload") or 0) - upload)
-            source_item["connections"] = max(0, int(source_item.get("connections") or 0) - 1)
-            source_item["traffic_total"] = int(source_item.get("traffic_download") or 0) + int(source_item.get("traffic_upload") or 0)
-        attributed_connections += 1
-    return attributed_connections
-
-
-def mihomo_connection_debug_samples(connections, limit=12):
-    samples = []
-    for connection in connections[:limit]:
-        metadata = connection.get("metadata") if isinstance(connection, dict) else {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        samples.append(
-            {
-                "source_ip": connection_source_ip(connection),
-                "target_domain": connection_target_domain(connection),
-                "download": first_number(connection.get("download")),
-                "upload": first_number(connection.get("upload")),
-                "chains": connection.get("chains") if isinstance(connection.get("chains"), list) else [],
-                "rule": connection.get("rule", ""),
-                "metadata": {
-                    key: metadata.get(key, "")
-                    for key in (
-                        "host",
-                        "destinationIP",
-                        "destinationPort",
-                        "remoteDestination",
-                        "network",
-                        "type",
-                        "sourceIP",
-                        "sourcePort",
-                    )
-                    if metadata.get(key, "") != ""
-                },
-            }
-        )
-    return samples
-
-
-def read_rule_domains(rule_id):
-    path = RULE_FILES.get(rule_id, {}).get("path")
-    if not path or not os.path.exists(path):
-        return set()
-    domains = set()
-    try:
-        with open(path, "r", encoding="utf-8") as file:
-            for line in file:
-                value = line.split("#", 1)[0].strip().lstrip(".")
-                if value:
-                    domains.add(value.lower())
-    except OSError:
-        pass
-    return domains
-
-
-def domain_matches_rule(domain, rules):
-    domain = (domain or "").strip(".").lower()
-    if not domain:
-        return False
-    parts = domain.split(".")
-    candidates = [".".join(parts[index:]) for index in range(len(parts))]
-    return any(candidate in rules for candidate in candidates)
-
-
-def classify_device_domain(domain, force_cn=None, force_nocn=None):
-    force_cn = force_cn if force_cn is not None else read_rule_domains("force-cn")
-    force_nocn = force_nocn if force_nocn is not None else read_rule_domains("force-nocn")
-    if domain_matches_rule(domain, force_nocn):
-        return "国外"
-    if domain_matches_rule(domain, force_cn):
-        return "国内"
-    return "默认"
-
-
-def normalize_client_ip(value):
-    client = (value or "").strip().strip('"').strip("'")
-    if client.startswith("[") and "]" in client:
-        client = client[1 : client.index("]")]
-    if client.startswith("::ffff:"):
-        client = client.removeprefix("::ffff:")
-    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", client):
-        client = client.rsplit(":", 1)[0]
-    try:
-        return str(ipaddress.ip_address(client))
-    except ValueError:
-        return ""
-
-
-def parse_device_log_clients(text):
-    devices = {}
-    client_patterns = [
-        re.compile(r'"client"\s*:\s*"([^"]+)"'),
-        re.compile(r"\bclient=([^\s,]+)"),
-        re.compile(r"\bfrom\s+([0-9a-fA-F:\.\[\]]+(?::\d+)?)"),
-    ]
-    qname_re = re.compile(r'"qname"\s*:\s*"([^"]+)"')
-    time_re = re.compile(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)")
-
-    for line in (text or "").splitlines():
-        ip = ""
-        for pattern in client_patterns:
-            match = pattern.search(line)
-            if match:
-                ip = normalize_client_ip(match.group(1))
-                if ip:
-                    break
-        if not ip:
-            continue
-
-        qname_match = qname_re.search(line)
-        timestamp_match = time_re.match(line)
-        item = devices.setdefault(
-            ip,
-            {
-                "ip": ip,
-                "last_seen": "",
-                "last_query": "",
-                "query_count": 0,
-                "domain_count": 0,
-                "domains": {},
-            },
-        )
-        item["query_count"] += 1
-        if timestamp_match:
-            # 日志可能是倒序或乱序，last_seen 取最大时间戳而不是第一条
-            seen = timestamp_match.group(1).replace("T", " ")
-            if seen > item["last_seen"]:
-                item["last_seen"] = seen
-        if qname_match:
-            domain = qname_match.group(1).rstrip(".")
-            item["last_query"] = domain
-            item["domains"][domain] = item["domains"].get(domain, 0) + 1
-            item["domain_count"] = len(item["domains"])
-
-    # 这里保留全部域名供流量归因索引使用，展示时再由 display_domains 截断
-    for item in devices.values():
-        item["domains"] = [
-            {"domain": domain, "count": count}
-            for domain, count in sorted(item["domains"].items(), key=lambda entry: entry[1], reverse=True)
-        ]
-    return list(devices.values())
-
-
-def display_domains(domains, limit=DEVICE_DOMAIN_DISPLAY_LIMIT):
-    return list(domains or [])[:limit]
-
-
-def read_neighbor_table():
-    neighbors = {}
-    ok, output = run_cmd(["ip", "neigh"], timeout=10)
-    if ok:
-        for line in output.splitlines():
-            parts = line.split()
-            if not parts:
-                continue
-            ip = normalize_client_ip(parts[0])
-            if not ip:
-                continue
-            mac = ""
-            if "lladdr" in parts:
-                index = parts.index("lladdr")
-                if index + 1 < len(parts):
-                    mac = parts[index + 1]
-            state = parts[-1] if parts else ""
-            neighbors[ip] = {
-                "mac": mac,
-                "neighbor_state": state,
-                "online": state.upper() in {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"},
-            }
-        return neighbors
-
-    arp_file = "/proc/net/arp"
-    if os.path.exists(arp_file):
-        try:
-            with open(arp_file, "r", encoding="utf-8") as file:
-                for line in file.readlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        ip = normalize_client_ip(parts[0])
-                        if ip:
-                            neighbors[ip] = {
-                                "mac": parts[3],
-                                "neighbor_state": "ARP",
-                                "online": parts[3] != "00:00:00:00:00:00",
-                            }
-        except OSError:
-            pass
-    return neighbors
-
-
-def collect_devices():
-    logs = ""
-    if os.path.exists(LOG_FILE):
-        ok, output = run_cmd(["tail", "-n", "800", LOG_FILE], timeout=10)
-        if ok:
-            logs = normalize_log_timestamps(output)
-
-    by_ip = {item["ip"]: item for item in parse_device_log_clients(logs)}
-    neighbors = read_neighbor_table()
-    notes = read_device_notes()
-    traffic_by_ip, traffic_status, mihomo_connections = collect_mihomo_device_traffic()
-    force_cn = read_rule_domains("force-cn")
-    force_nocn = read_rule_domains("force-nocn")
-    for ip, neighbor in neighbors.items():
-        by_ip.setdefault(
-            ip,
-            {
-                "ip": ip,
-                "last_seen": "",
-                "last_query": "",
-                "query_count": 0,
-                "domain_count": 0,
-                "domains": [],
-            },
-        )
-        by_ip[ip].update(neighbor)
-    for ip, traffic in traffic_by_ip.items():
-        by_ip.setdefault(
-            ip,
-            {
-                "ip": ip,
-                "last_seen": "",
-                "last_query": "",
-                "query_count": 0,
-                "domain_count": 0,
-                "domains": [],
-            },
-        )
-        by_ip[ip].update(traffic)
-    attributed_connections = apply_domain_attributed_traffic(by_ip, mihomo_connections, set(traffic_by_ip.keys()))
-    traffic_status["attributed_connections"] = attributed_connections
-
-    devices = []
-    for ip, item in by_ip.items():
-        query_count = int(item.get("query_count") or 0)
-        online = bool(item.get("online", False))
-        if online and query_count:
-            status = "在线"
-        elif online:
-            status = "安静在线"
-        elif query_count:
-            status = "最近活跃"
-        else:
-            status = "离线"
-        devices.append(
-            {
-                "ip": ip,
-                "mac": item.get("mac", ""),
-                "neighbor_state": item.get("neighbor_state", ""),
-                "online": online,
-                "status": status,
-                "note": notes.get(ip, ""),
-                "last_seen": item.get("last_seen", ""),
-                "last_query": item.get("last_query", ""),
-                "query_count": query_count,
-                "domain_count": int(item.get("domain_count") or 0),
-                "domains": [
-                    {**domain, "route": classify_device_domain(domain.get("domain", ""), force_cn, force_nocn)}
-                    for domain in display_domains(item.get("domains", []))
-                ],
-                "traffic_download": int(item.get("traffic_download") or 0),
-                "traffic_upload": int(item.get("traffic_upload") or 0),
-                "traffic_total": int(item.get("traffic_total") or 0),
-                "traffic_connections": int(item.get("connections") or 0),
-                "traffic_estimated": bool(item.get("traffic_estimated")),
-            }
-        )
-
-    return {
-        "devices": sorted(
-            devices,
-            key=lambda item: (item["online"], item["traffic_total"], item["last_seen"], item["query_count"]),
-            reverse=True,
-        ),
-        "traffic_status": traffic_status,
-    }
 
 
 def read_env():
@@ -1104,26 +507,67 @@ def display_upstream(value, default_scheme=None):
     return value
 
 
-def looks_like_host_port(value):
-    if value.count(":") == 1:
-        host, port = value.rsplit(":", 1)
-        return bool(host) and port.isdigit()
-    return False
+# mosdns forward 插件支持的上游协议；不在列表里的（http://、doh:// 之类）直接拒绝
+UPSTREAM_SCHEMES = ("udp", "tcp", "tls", "https", "h3", "quic", "doq", "tcp+pipeline", "tls+pipeline")
+
+
+def bracket_bare_ipv6(value):
+    # "2400:3200::1" 这种没加方括号的 IPv6 会被当成 host:port 解析，这里补上方括号。
+    # value 是去掉 scheme:// 之后的部分；带路径（https://host/path）时只看第一段
+    netloc, slash, rest = value.partition("/")
+    if netloc.startswith("[") or netloc.count(":") < 2:
+        return value
+    try:
+        ipaddress.IPv6Address(netloc)
+    except ValueError:
+        return value
+    return f"[{netloc}]{slash}{rest}"
 
 
 def normalize_upstream(value, default_scheme=None, default_port=None):
+    """校验并规范化上游地址，返回 (地址, 错误信息)；错误时地址为空串。
+
+    default_scheme：没写协议时补上（国内上游补 udp://）；
+    default_port：没写协议也没写端口时补上端口（国外上游保持 host:port 形式，和模板一致）。
+    """
     value = str(value or "").strip()
-    if "://" in value:
-        return value
-    if default_scheme:
-        return f"{default_scheme}://{value}"
-    if default_port and ":" not in value and not looks_like_host_port(value):
-        return f"{value}:{default_port}"
-    return value
+    if not value:
+        return "", "不能为空"
+    if any(char in value for char in '"\\#'):
+        return "", "不能包含双引号、反斜杠或 #"
+    if any(char.isspace() for char in value):
+        return "", "不能包含空格"
+    scheme, sep, rest = value.partition("://")
+    if not sep:
+        scheme, rest = (default_scheme or ""), value
+    rest = bracket_bare_ipv6(rest)
+    probe_scheme = scheme or "udp"
+    if probe_scheme.lower() not in UPSTREAM_SCHEMES:
+        return "", f"不支持的协议 {probe_scheme}://，可用：" + "、".join(UPSTREAM_SCHEMES)
+    try:
+        parts = urlsplit(f"{probe_scheme}://{rest}")
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        return "", f"地址格式不正确：{exc}"
+    if not hostname:
+        return "", "缺少主机名或 IP"
+    if scheme:
+        return f"{scheme}://{rest}", None
+    if default_port and port is None and "/" not in rest:
+        return f"{rest}:{default_port}", None
+    return rest, None
 
 
 def restart_mosdns():
+    # 先清掉 start-limit 计数：连续几次启动失败后 systemd 会拒绝再启动，回滚也会被挡住
+    run_cmd(["systemctl", "reset-failed", "mosdns"], timeout=10)
     return run_cmd(["systemctl", "restart", "mosdns"], timeout=30)
+
+
+def tail_lines(text, count=15):
+    lines = (text or "").strip().splitlines()
+    return "\n".join(lines[-count:])
 
 
 def free_local_port():
@@ -1194,14 +638,14 @@ def config_starts(path, wait_seconds=3.0):
         while time.time() < deadline:
             if proc.poll() is not None:
                 stdout, stderr = proc.communicate()
-                return False, clean_output(stdout + stderr) or "mosdns 校验进程异常退出"
+                return False, tail_lines(clean_output(stdout + stderr)) or "mosdns 校验进程异常退出"
             if port_open(api_port):
                 api_ready = True
                 break
             time.sleep(0.2)
         if proc.poll() is not None:
             stdout, stderr = proc.communicate()
-            return False, clean_output(stdout + stderr) or "mosdns 校验进程异常退出"
+            return False, tail_lines(clean_output(stdout + stderr)) or "mosdns 校验进程异常退出"
         proc.terminate()
         try:
             proc.wait(timeout=3)
@@ -1220,12 +664,56 @@ def config_starts(path, wait_seconds=3.0):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def upstream_value_error(value):
-    # 上游地址会被拼进 YAML 的双引号字符串和 # TAG 注释行，这三个字符会破坏结构
-    value = str(value or "")
-    if any(char in value for char in '"\\#'):
-        return '不能包含双引号、反斜杠或 #'
-    return None
+def upstream_value_error(value, default_scheme=None):
+    # 上游地址会被拼进 YAML 的双引号字符串和 # TAG 注释行，字符/协议/主机名都在 normalize_upstream 里查
+    return normalize_upstream(value, default_scheme=default_scheme)[1]
+
+
+def config_text_starts(content):
+    # config_starts 只接受文件路径：把候选内容写到临时文件再校验，不碰 config.yaml
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".yaml", prefix="mosdns-candidate-", delete=False) as file:
+        file.write(content)
+        path = file.name
+    try:
+        return config_starts(path)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def rule_content_starts(rule_id, content):
+    # 规则文件的校验：把当前 config.yaml 里指向 rules/ 的路径改到临时目录，
+    # 临时目录里放候选规则文件，其他规则文件用符号链接指回原文件，再起一个沙箱 mosdns
+    meta = RULE_FILES.get(rule_id)
+    if not meta:
+        return False, "未知规则文件"
+    config_text = read_config_text()
+    if not config_text.strip():
+        return False, "配置文件不存在，无法校验规则"
+    rules_dir = os.path.dirname(meta["path"])
+    tmpdir = tempfile.mkdtemp(prefix="mosdns-rules-")
+    try:
+        tmp_rules = os.path.join(tmpdir, "rules")
+        os.makedirs(tmp_rules)
+        candidate_name = os.path.basename(meta["path"])
+        with open(os.path.join(tmp_rules, candidate_name), "w", encoding="utf-8") as file:
+            file.write(content)
+        if os.path.isdir(rules_dir):
+            for name in os.listdir(rules_dir):
+                source = os.path.join(rules_dir, name)
+                if name == candidate_name or not os.path.isfile(source):
+                    continue
+                target = os.path.join(tmp_rules, name)
+                try:
+                    os.symlink(source, target)
+                except OSError:
+                    shutil.copy2(source, target)
+        rewritten = config_text.replace(rules_dir.rstrip("/") + "/", tmp_rules + "/")
+        return config_text_starts(rewritten)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def quoted_replacer(value):
@@ -1278,8 +766,8 @@ def restore_default_template():
     with open(DEFAULT_TEMPLATE_FILE, "r", encoding="utf-8") as file:
         content = file.read()
 
-    local_dns = current.get("local_dns_raw") or normalize_upstream(current.get("local_dns", ""), default_scheme="udp")
-    remote_dns = current.get("remote_dns_raw") or normalize_upstream(current.get("remote_dns", ""), default_port=53)
+    local_dns = current.get("local_dns_raw") or normalize_upstream(current.get("local_dns", ""), default_scheme="udp")[0]
+    remote_dns = current.get("remote_dns_raw") or normalize_upstream(current.get("remote_dns", ""), default_port=53)[0]
     ttl = current.get("ttl") or "86400"
     if not re.fullmatch(r"\d{1,7}", ttl):
         ttl = "86400"
@@ -1724,15 +1212,13 @@ def upgrade_mosctl_panel():
     schedule_web_restart()
     return (
         True,
-        "Mosctl 面板升级完成，Web 服务将在 1 秒后重启。\n"
+        "Mosctl 面板升级完成，Web 服务将在 1 秒后重启，页面会在服务恢复后自动刷新。\n"
         f"来源：{source}\n"
         f"仓库：{settings['repo_url']}\n"
         f"分支：{settings['branch']}\n"
         f"旧版本：v{PANEL_VERSION}\n"
         f"新版本：v{remote_version}\n"
-        f"旧面板备份：{backup_root}\n"
-        "请稍等几秒后刷新页面。"
-        ,
+        f"旧面板备份：{backup_root}",
         True,
     )
 
@@ -1799,7 +1285,9 @@ def upgrade_mosdns_core():
         if os.path.exists(MOSDNS_BIN):
             shutil.copy2(MOSDNS_BIN, backup_bin)
 
-        run_cmd(["systemctl", "stop", "mosdns"], timeout=30)
+        stop_ok, stop_message = run_cmd(["systemctl", "stop", "mosdns"], timeout=30)
+        if not stop_ok:
+            return False, "停止 mosdns 失败，未替换内核：\n" + stop_message
         try:
             shutil.copy2(candidate, MOSDNS_BIN)
             os.chmod(MOSDNS_BIN, 0o755)
@@ -1811,11 +1299,19 @@ def upgrade_mosdns_core():
             cleanup_old_backups()
             return True, f"mosdns 内核升级完成。\n来源：{source}\n旧版本：{clean_version(old_version)}\n新版本：{clean_version(new_version)}\n旧内核备份：{backup_bin}"
 
-        if os.path.exists(backup_bin):
+        # 回滚本身也可能失败（磁盘满、权限等），要把原因说清楚而不是抛 500
+        if not os.path.exists(backup_bin):
+            return False, "新内核启动失败，且没有旧内核备份可回滚，请手动处理：\n" + restart_message
+        try:
             shutil.copy2(backup_bin, MOSDNS_BIN)
             os.chmod(MOSDNS_BIN, 0o755)
-            restart_mosdns()
-        return False, "新内核启动失败，已回滚旧内核：\n" + restart_message
+        except Exception as exc:
+            return False, f"新内核启动失败，回滚旧内核也失败（{exc}），请手动把 {backup_bin} 复制回 {MOSDNS_BIN}：\n{restart_message}"
+        rollback_ok, rollback_message = restart_mosdns()
+        text = "新内核启动失败，已回滚旧内核：\n" + restart_message
+        if not rollback_ok:
+            text += "\n\n回滚后重启仍失败，请手动检查：\n" + rollback_message
+        return False, text
 
 
 def backup_file(path, prefix):
@@ -1849,7 +1345,6 @@ def list_backup_files(paths):
                 "path": real_path,
                 "size": stat.st_size,
                 "mtime": int(stat.st_mtime),
-                "mtime_text": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
             }
         )
     items.sort(key=lambda item: item["mtime"], reverse=True)
@@ -1901,6 +1396,9 @@ def restore_backup(backup_id):
     source = resolve_backup(backup_id)
     if not source:
         return False, "未找到这个备份文件"
+    ok, message = config_starts(source)
+    if not ok:
+        return False, "这个备份无法启动 mosdns，未恢复：\n" + message
 
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
@@ -2044,11 +1542,88 @@ def test_sync_peers(data):
     return ok, message, results
 
 
-def read_crontab_lines():
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+def read_crontab_state():
+    # 返回 (行列表, crontab 命令是否存在)；没装 cron 的系统上 crontab 二进制不存在
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+    except FileNotFoundError:
+        return [], False
     if result.returncode != 0:
-        return []
-    return result.stdout.splitlines()
+        return [], True
+    return result.stdout.splitlines(), True
+
+
+def read_crontab_lines():
+    return read_crontab_state()[0]
+
+
+def cron_service_active():
+    # Debian 叫 cron，RHEL 系叫 crond；任一在跑即可
+    return any(run_cmd(["systemctl", "is-active", "--quiet", name], timeout=10)[0] for name in ("cron", "crond"))
+
+
+GEO_LOG_HEADER_RE = re.compile(r"^===== (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) 更新 Geo 规则 =====")
+GEO_LOG_RESULT_RE = re.compile(r"^===== 结果: (成功|失败) =====")
+
+
+def read_tail_text(path, max_bytes=64 * 1024):
+    try:
+        with open(path, "rb") as file:
+            file.seek(0, os.SEEK_END)
+            size = file.tell()
+            file.seek(max(0, size - max_bytes))
+            return file.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def parse_geo_update_log(text, summary_lines=8):
+    """取日志里最后一个「===== <时间> 更新 Geo 规则 =====」块，返回 {at, ok, summary}；没有块返回 None。
+
+    ok 由块里的「===== 结果: 成功/失败 =====」决定；老版本 CLI 没有这行时为 None。
+    """
+    lines = clean_output(text).splitlines()
+    start = None
+    for index in range(len(lines) - 1, -1, -1):
+        if GEO_LOG_HEADER_RE.match(lines[index]):
+            start = index
+            break
+    if start is None:
+        return None
+    header = GEO_LOG_HEADER_RE.match(lines[start])
+    try:
+        at = int(time.mktime(time.strptime(header.group(1), "%Y-%m-%d %H:%M:%S")))
+    except (ValueError, OverflowError):
+        at = 0
+    block = lines[start + 1 :]
+    ok = None
+    for line in block:
+        result = GEO_LOG_RESULT_RE.match(line)
+        if result:
+            ok = result.group(1) == "成功"
+    body = [line for line in block if line.strip() and not GEO_LOG_RESULT_RE.match(line)]
+    return {"at": at, "ok": ok, "summary": body[-summary_lines:]}
+
+
+def geo_rule_files():
+    items = []
+    for name in ("geosite_cn.txt", "geosite_no_cn.txt"):
+        path = f"{MOSDNS_DIR}/rules/{name}"
+        try:
+            info = os.stat(path)
+            items.append({"name": name, "mtime": int(info.st_mtime), "size": info.st_size})
+        except OSError:
+            items.append({"name": name, "mtime": 0, "size": 0})
+    return items
+
+
+def geo_update_status():
+    return {
+        "last_run": parse_geo_update_log(read_tail_text(UPDATE_LOG)),
+        "files": geo_rule_files(),
+        "cron_available": read_crontab_state()[1],
+        "cron_service_active": cron_service_active(),
+    }
 
 
 def is_geo_update_cron(line):
@@ -2191,7 +1766,10 @@ def write_geo_schedule(data):
     crontab_text = "\n".join(lines).strip()
     if crontab_text:
         crontab_text += "\n"
-    result = subprocess.run(["crontab", "-"], input=crontab_text, capture_output=True, text=True, timeout=10)
+    try:
+        result = subprocess.run(["crontab", "-"], input=crontab_text, capture_output=True, text=True, timeout=10)
+    except FileNotFoundError:
+        return False, "系统没有 crontab 命令，请先安装 cron（Debian: apt install cron；RHEL: dnf install cronie）"
     if result.returncode != 0:
         return False, clean_output(result.stdout + result.stderr) or "写入 crontab 失败"
     return True, describe_geo_schedule(mode, time_value, weekday)
@@ -2286,13 +1864,76 @@ except Exception:
     pass
 
 
+def is_ip_literal(value):
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def rule_lines(content):
+    # 去掉行内 # 注释和空行，返回 (行号, 内容)
+    for number, line in enumerate(str(content or "").splitlines(), 1):
+        body = line.split("#", 1)[0].strip()
+        if body:
+            yield number, body
+
+
+def hosts_rule_error(content):
+    # mosdns hosts 插件：每行「匹配模式 IP [IP...]」；最常见的错误是把 IP 写在前面
+    for number, body in rule_lines(content):
+        fields = body.split()
+        if is_ip_literal(fields[0]):
+            return f"格式是「域名 IP」，不是「IP 域名」（第 {number} 行）"
+        if len(fields) < 2:
+            return f"第 {number} 行缺少 IP：格式是「域名 IP」"
+        for field in fields[1:]:
+            if not is_ip_literal(field):
+                return f"第 {number} 行的「{field}」不是合法 IP"
+    return None
+
+
+DOMAIN_RULE_PREFIXES = ("domain:", "full:", "keyword:", "regexp:")
+
+
+def domain_rule_error(content):
+    # domain_set 插件：每行一个匹配项，可带 domain:/full:/keyword:/regexp: 前缀，不能有空格
+    for number, body in rule_lines(content):
+        if len(body.split()) != 1:
+            return f"第 {number} 行只能写一个域名，不能有空格（注释请用 # 开头）"
+        value = body
+        for prefix in DOMAIN_RULE_PREFIXES:
+            if body.lower().startswith(prefix):
+                value = body[len(prefix):]
+                break
+        if not value:
+            return f"第 {number} 行前缀后面没有内容"
+    return None
+
+
+def rule_content_error(rule_id, content):
+    if rule_id == "hosts":
+        return hosts_rule_error(content)
+    if rule_id in ("force-cn", "force-nocn"):
+        return domain_rule_error(content)
+    return None
+
+
 def save_rule_content(rule_id, content):
-    # 返回 (ok, message, (备份路径, 规则路径))，第三项给 restart_or_rollback 用
+    # 返回 (ok, message, (备份路径, 规则路径))，第三项给 restart_or_rollback 用。
+    # 先查格式、再用沙箱 mosdns 校验，都通过才写文件；线上服务在这之前不会被碰
     meta = RULE_FILES.get(rule_id)
     if not meta:
         return False, "未知规则文件", None
     if not is_safe_text(content):
         return False, "规则内容不合法或过大", None
+    format_error = rule_content_error(rule_id, content)
+    if format_error:
+        return False, format_error, None
+    ok, message = rule_content_starts(rule_id, content)
+    if not ok:
+        return False, "规则校验失败，未保存：\n" + message, None
 
     path = meta["path"]
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2309,7 +1950,7 @@ def broadcast_rule(rule_id, content):
         return ""
     settings = read_sync_settings()
     if not settings["enabled"]:
-        return "规则同步未启用。"
+        return ""
     if not settings["peers"]:
         return "规则同步已启用，但没有配置其他节点。"
     if not settings["token"]:
@@ -2368,12 +2009,14 @@ def update_config_values(local_dns, remote_dns, ttl):
     if not re.fullmatch(r"\d{1,7}", str(ttl or "")):
         return False, "TTL 必须是数字"
     for label, value in (("国内 DNS", local_dns), ("国外 DNS", remote_dns)):
-        if not is_safe_text(value, 200) or "\n" in value or "\r" in value or not value.strip():
+        if not is_safe_text(value, 200):
             return False, f"{label} 不合法"
-        if upstream_value_error(value):
-            return False, f"{label} {upstream_value_error(value)}"
-    local_dns = normalize_upstream(local_dns, default_scheme="udp")
-    remote_dns = normalize_upstream(remote_dns, default_port=53)
+    local_dns, local_error = normalize_upstream(local_dns, default_scheme="udp")
+    if local_error:
+        return False, f"国内 DNS {local_error}"
+    remote_dns, remote_error = normalize_upstream(remote_dns, default_port=53)
+    if remote_error:
+        return False, f"国外 DNS {remote_error}"
 
     text = read_config_text()
     new_text, ttl_count = re.subn(
@@ -2400,9 +2043,70 @@ def update_config_values(local_dns, remote_dns, ttl):
     if new_text == text:
         return True, "配置无变化"
 
+    ok, message = config_text_starts(new_text)
+    if not ok:
+        return False, "配置校验失败，未保存：\n" + message
     backup = backup_file(CONFIG_FILE, "config")
     write_config_text(new_text)
     return restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
+
+
+def config_api_address():
+    # 取 config.yaml 里 api.http 的监听地址，转成本机可访问的 host:port；没有 api 段返回空
+    match = re.search(r'(?m)^\s*http:\s*["\']?([^"\'#\n]+?)["\']?\s*$', read_config_text())
+    if not match:
+        return ""
+    listen = match.group(1).strip()
+    if listen.startswith(":"):
+        return "127.0.0.1" + listen
+    for wildcard in ("0.0.0.0:", "[::]:"):
+        if listen.startswith(wildcard):
+            return "127.0.0.1:" + listen[len(wildcard):]
+    return listen
+
+
+def config_cache_tag():
+    match = re.search(r'(?m)^\s*-\s*tag:\s*["\']?([A-Za-z0-9_.-]+)["\']?\s*\n\s*type:\s*["\']?cache["\']?\s*$', read_config_text())
+    return match.group(1) if match else ""
+
+
+def config_dump_file():
+    match = re.search(r'(?m)^\s*dump_file:\s*["\']?([^"\'#\n]+?)["\']?\s*$', read_config_text())
+    return match.group(1).strip() if match else f"{MOSDNS_DIR}/cache.dump"
+
+
+def flush_cache_via_api(timeout=5):
+    # mosdns 的 cache 插件提供 GET /plugins/<tag>/flush，清缓存不用重启
+    address = config_api_address()
+    tag = config_cache_tag()
+    if not address or not tag:
+        return False, "配置里没有 api.http 监听或 cache 插件"
+    url = f"http://{address}/plugins/{tag}/flush"
+    try:
+        req = urlrequest.Request(url, headers={"User-Agent": "mosdns-web-manager"})
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                return True, f"已通过 API 清空缓存（{url}），无需重启"
+            return False, f"API 返回 HTTP {resp.status}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def flush_cache():
+    ok, message = flush_cache_via_api()
+    if ok:
+        return True, message
+    # API 不可用（服务没起来、配置里没有 api 段等）时退回老办法：删 dump 文件再重启
+    try:
+        os.remove(config_dump_file())
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return False, f"删除缓存文件失败：{exc}"
+    restart_ok, restart_message = restart_mosdns()
+    if restart_ok:
+        return True, f"API 清缓存不可用（{message}），已删除缓存文件并重启 mosdns"
+    return False, f"API 清缓存不可用（{message}），删除缓存文件后重启 mosdns 失败：\n{restart_message}"
 
 
 def rescue_enabled():
@@ -2490,6 +2194,18 @@ def latest_mosdns_release():
     }
 
 
+def server_time_info():
+    # cron 按服务器本地时间跑；把时区名、偏移和当前时间一起给前端，前端按偏移算出服务器此刻的钟点
+    now = datetime.now().astimezone()
+    offset = now.utcoffset() or timedelta(0)
+    total = int(offset.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    hours, minutes = divmod(abs(total) // 60, 60)
+    zone = now.tzname() or ""
+    label = f"{zone} (UTC{sign}{hours:02d}:{minutes:02d})" if zone else f"UTC{sign}{hours:02d}:{minutes:02d}"
+    return {"server_tz": label, "server_time": int(now.timestamp()), "server_utc_offset": total}
+
+
 def service_health_summary(running, enabled, rescue, values):
     issues = []
     tone = "ok"
@@ -2539,7 +2255,7 @@ def service_health_summary(running, enabled, rescue, values):
         "tone": tone,
         "title": title,
         "issues": issues,
-        "last_checked": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_checked": int(time.time()),
     }
 
 
@@ -2602,64 +2318,10 @@ def api_status():
             "panel_version_text": f"Mosctl v{PANEL_VERSION}",
             "web_port": env.get("WEB_PORT", "7840"),
             "health": service_health_summary(running, enabled, rescue, values),
+            **server_time_info(),
             **values,
         }
     )
-
-
-@app.route("/api/devices")
-@login_required
-def api_devices():
-    data = collect_devices()
-    # API shape: {"devices": collect_devices()} legacy contract now expands diagnostics.
-    return jsonify({"devices": data["devices"], "traffic_status": data["traffic_status"], "updated_at": int(time.time())})
-
-
-@app.route("/api/mihomo-settings", methods=["GET", "POST"])
-@login_required
-def api_mihomo_settings():
-    if request.method == "GET":
-        return jsonify(read_mihomo_settings())
-    ok, message = write_mihomo_settings(json_body())
-    return jsonify({"success": ok, "message": message, **read_mihomo_settings()})
-
-
-@app.route("/api/mihomo-test", methods=["POST"])
-@login_required
-def api_mihomo_test():
-    data = json_body()
-    if data:
-        ok, message = write_mihomo_settings(data)
-        if not ok:
-            return jsonify({"success": False, "message": message, **read_mihomo_settings()})
-    ok, data = mihomo_api_get("/connections", timeout=3)
-    connections = data.get("connections") if ok and isinstance(data.get("connections"), list) else []
-    if ok:
-        return jsonify({"success": True, "message": f"连接正常，当前连接数 {len(connections)}", **read_mihomo_settings()})
-    return jsonify({"success": False, "message": data.get("error", "mihomo 控制器不可用"), **read_mihomo_settings()})
-
-
-@app.route("/api/mihomo-debug", methods=["POST"])
-@login_required
-def api_mihomo_debug():
-    ok, data = mihomo_api_get("/connections", timeout=3)
-    if not ok:
-        return jsonify({"success": False, "message": data.get("error", "mihomo 控制器不可用"), "samples": []})
-    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
-    return jsonify(
-        {
-            "success": True,
-            "message": f"已读取 {len(connections)} 条连接，显示前 {min(len(connections), 12)} 条样例",
-            "samples": mihomo_connection_debug_samples(connections),
-        }
-    )
-
-
-@app.route("/api/devices/<path:device_ip>/note", methods=["POST"])
-@login_required
-def api_device_note(device_ip):
-    ok, message = write_device_note(device_ip, json_body().get("note", ""))
-    return jsonify({"success": ok, "message": message})
 
 
 @app.route("/api/core-version")
@@ -2683,13 +2345,17 @@ def api_control():
     commands = {
         "start": (["systemctl", "start", "mosdns"], 30),
         "stop": (["systemctl", "stop", "mosdns"], 30),
-        "restart": (["systemctl", "restart", "mosdns"], 30),
         "update": ([MOSCTL, "update"], 180),
-        "flush": ([MOSCTL, "flush"], 60),
         "test": ([MOSCTL, "test"], 60),
         "rescue_on": ([MOSCTL, "rescue", "enable"], 60),
         "rescue_off": ([MOSCTL, "rescue", "disable"], 60),
     }
+    if action == "restart":
+        ok, message = restart_mosdns()
+        return jsonify({"success": ok, "message": message})
+    if action == "flush":
+        ok, message = flush_cache()
+        return jsonify({"success": ok, "message": message})
     if action == "restore_default":
         ok, message = restore_default_template()
         return jsonify({"success": ok, "message": message})
@@ -2698,7 +2364,7 @@ def api_control():
         return jsonify({"success": ok, "message": message})
     if action == "upgrade_panel":
         ok, message, should_reload = upgrade_mosctl_panel()
-        return jsonify({"success": ok, "message": message, "reload_after": 5 if should_reload else 0})
+        return jsonify({"success": ok, "message": message, "reload_after": 60 if should_reload else 0})
     if action not in commands:
         return jsonify({"success": False, "message": "未知操作"})
     ok, message = run_cmd(commands[action][0], timeout=commands[action][1])
@@ -2741,6 +2407,9 @@ def api_config():
     content = data.get("content", "")
     if not is_safe_text(content, 200000):
         return jsonify({"success": False, "message": "配置内容不合法或过大"})
+    ok, message = config_text_starts(content)
+    if not ok:
+        return jsonify({"success": False, "message": "配置校验失败，未保存：\n" + message})
 
     backup = backup_file(CONFIG_FILE, "config")
     write_config_text(content)
@@ -2798,9 +2467,9 @@ def api_rule_sync_test():
 @login_required
 def api_geo_schedule():
     if request.method == "GET":
-        return jsonify(read_geo_schedule())
+        return jsonify({**read_geo_schedule(), **geo_update_status()})
     ok, message = write_geo_schedule(json_body())
-    return jsonify({"success": ok, "message": message, **read_geo_schedule()})
+    return jsonify({"success": ok, "message": message, **read_geo_schedule(), **geo_update_status()})
 
 
 def sync_token_matches(provided, expected):

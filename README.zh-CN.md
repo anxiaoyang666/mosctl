@@ -47,8 +47,6 @@ WEB_PORT=7840 WEB_USER=admin WEB_SECRET='your-password' bash -c "$(curl -fsSL ht
 - `MOSCTL_REPO_URL`：面板升级和 `mosctl sync` 使用的仓库地址
 - `MOSCTL_BRANCH`：面板升级和 `mosctl sync` 使用的分支，默认 `main`
 - `GH_PROXY`：GitHub 代理前缀，只在直连 GitHub 失败后才使用；设为空字符串表示不走代理
-- `MIHOMO_CONTROLLER`：设备流量页使用的 mihomo 外部控制器地址，默认 `http://127.0.0.1:9090`
-- `MIHOMO_API_SECRET`：mihomo 控制器密钥，没有设置密钥时留空
 - `RULE_SYNC_ENABLED`：`true` / `false`，把强制国内 / 强制国外规则的改动推送到其他面板
 - `RULE_SYNC_TOKEN`：`/api/rule-sync` 校验用的共享密钥
 - `RULE_SYNC_PEERS`：其他 mosctl / mihomo 面板地址，用 `|` 分隔

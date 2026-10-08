@@ -32,8 +32,6 @@ class MosctlReadmeContractTest(unittest.TestCase):
             "MOSCTL_REPO_URL",
             "MOSCTL_BRANCH",
             "GH_PROXY",
-            "MIHOMO_CONTROLLER",
-            "MIHOMO_API_SECRET",
             "RULE_SYNC_ENABLED",
             "RULE_SYNC_TOKEN",
             "RULE_SYNC_PEERS",

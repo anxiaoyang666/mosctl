@@ -113,18 +113,27 @@ geo_url() {
     echo "$value"
 }
 
+# 只有标准输出是终端时才显示进度；cron 里跑时进度点会把日志刷满
+wget_fetch() {
+    if [ -t 1 ]; then
+        wget -q --show-progress --progress=dot:mega -O "$1" "$2"
+    else
+        wget -q -O "$1" "$2"
+    fi
+}
+
 # 先直连，失败再走代理
 fetch_url() {
     local output="$1"
     local source="$2"
     local proxied
-    if wget -q --show-progress -O "$output" "$source"; then
+    if wget_fetch "$output" "$source"; then
         return 0
     fi
     proxied="$(geo_url "$source")"
     [ "$proxied" != "$source" ] || return 1
     echo -e "${YELLOW}   直连失败，改走代理重试...${PLAIN}"
-    wget -q --show-progress -O "$output" "$proxied"
+    wget_fetch "$output" "$proxied"
 }
 
 rescue_enable() {
@@ -307,8 +316,46 @@ edit_rule() {
     systemctl restart mosdns && echo -e "${GREEN}✅ 规则已应用。${PLAIN}"
 }
 
+# config.yaml 里 api.http 的监听地址，转成本机能访问的 host:port；没有 api 段输出空
+config_api_addr() {
+    local listen
+    listen="$(grep -E '^[[:space:]]*http:' "$CONFIG_FILE" 2>/dev/null | head -n 1 \
+        | sed -nE "s/^[[:space:]]*http:[[:space:]]*[\"']?([^\"'#]*)[\"']?[[:space:]]*\$/\1/p" | sed -E 's/[[:space:]]+$//')"
+    case "$listen" in
+        "") ;;
+        :*) echo "127.0.0.1${listen}" ;;
+        0.0.0.0:*) echo "127.0.0.1:${listen#0.0.0.0:}" ;;
+        "[::]:"*) echo "127.0.0.1:${listen#\[::\]:}" ;;
+        *) echo "$listen" ;;
+    esac
+}
+
+# 第一个 type: cache 插件的 tag
+config_cache_tag() {
+    grep -E '^[[:space:]]*(- tag:|type:)' "$CONFIG_FILE" 2>/dev/null \
+        | awk '/- tag:/ {tag=$3} /type:[[:space:]]*"?cache"?[[:space:]]*$/ {gsub(/["'"'"']/, "", tag); print tag; exit}'
+}
+
+http_get_ok() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS -m 5 -o /dev/null "$1"
+    else
+        wget -q -T 5 -O /dev/null "$1"
+    fi
+}
+
 flush_cache() {
+    # mosdns 的 cache 插件提供 GET /plugins/<tag>/flush，不用重启；API 不通时才删 dump 文件重启
+    local api tag
+    api="$(config_api_addr)"
+    tag="$(config_cache_tag)"
+    if [ -n "$api" ] && [ -n "$tag" ] && http_get_ok "http://${api}/plugins/${tag}/flush"; then
+        echo -e "${GREEN}✅ 缓存已通过 API 清空（无需重启）${PLAIN}"
+        return 0
+    fi
+    echo -e "${YELLOW}API 清缓存不可用，改为删除缓存文件并重启 mosdns...${PLAIN}"
     rm -f "$CACHE_FILE"
+    systemctl reset-failed mosdns 2>/dev/null
     systemctl restart mosdns && echo -e "${GREEN}✅ 缓存已清空！${PLAIN}"
 }
 
@@ -406,8 +453,19 @@ rules_menu() {
     esac
 }
 
+# 结尾固定打印「===== 结果: 成功/失败 =====」，面板从 /var/log/mosctl-update.log 里读这一行判断上次结果
 update_geo_rules() {
     echo "===== $(date '+%F %T') 更新 Geo 规则 ====="
+    if do_update_geo_rules; then
+        echo "===== 结果: 成功 ====="
+        return 0
+    fi
+    echo -e "${RED}❌ 规则更新失败${PLAIN}"
+    echo "===== 结果: 失败 ====="
+    return 1
+}
+
+do_update_geo_rules() {
     echo -e "${YELLOW}⬇️  正在更新 GeoSite...${PLAIN}"
     mkdir -p /etc/mosdns/rules
     # 旧版本会下载 geoip_cn / geosite_apple 并带着 user_iot / local-ptr，但配置从未引用它们；顺手清掉
@@ -431,7 +489,8 @@ update_geo_rules() {
     # 只下载 config.yaml 实际引用的两个列表
     dl "/etc/mosdns/rules/geosite_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt" || return 1
     dl "/etc/mosdns/rules/geosite_no_cn.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/proxy-list.txt" || return 1
-    systemctl restart mosdns
+    systemctl reset-failed mosdns 2>/dev/null
+    systemctl restart mosdns || return 1
     echo -e "${GREEN}✅ 规则更新完毕！${PLAIN}"
 }
 
@@ -532,8 +591,8 @@ if [ $# -gt 0 ]; then
         rescue)
             if [ "$2" == "enable" ]; then rescue_enable; elif [ "$2" == "disable" ]; then rescue_disable; else echo "Usage: mosctl rescue {enable|disable}"; fi ;;
         sync) sync_config ;;
-        update) update_geo_rules ;;
-        flush) flush_cache ;;
+        update) update_geo_rules; exit $? ;;
+        flush) flush_cache; exit $? ;;
         cache-ttl) change_cache_ttl "$2" ;;
         test) run_test ;;
         version) echo "$SCRIPT_VER" ;;

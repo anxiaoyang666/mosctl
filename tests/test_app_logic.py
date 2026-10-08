@@ -1,4 +1,4 @@
-"""纯逻辑函数的功能测试：设备归因、备份过滤、.env 读写、URL 解析。
+"""纯逻辑函数的功能测试：备份过滤、.env 读写、URL 解析、配置/规则校验。
 
 其他测试只 grep 源码，抓不到"last_seen 取错"这类逻辑错误，这里真的把 app.py
 exec 成模块来调用。Flask 用桩替换，/etc/mosdns 指到临时目录（app.py 导入时会
@@ -6,8 +6,10 @@ exec 成模块来调用。Flask 用桩替换，/etc/mosdns 指到临时目录（
 """
 from pathlib import Path
 import os
+import re
 import sys
 import tempfile
+import time
 import types
 import unittest
 
@@ -43,19 +45,6 @@ def load_app(tmp_dir):
     return module
 
 
-def device(ip, **extra):
-    item = {
-        "ip": ip,
-        "last_seen": "",
-        "last_query": "",
-        "query_count": 0,
-        "domain_count": 0,
-        "domains": [],
-    }
-    item.update(extra)
-    return item
-
-
 class AppLogicTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -63,68 +52,6 @@ class AppLogicTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
-
-    # --- 设备 / 流量归因 ---
-
-    def test_last_seen_is_max_timestamp_regardless_of_log_order(self):
-        logs = "\n".join(
-            [
-                '2026-10-08 10:00:05 {"client":"10.0.0.5","qname":"a.example.com."}',
-                '2026-10-08 10:00:09 {"client":"10.0.0.5","qname":"b.example.com."}',
-                '2026-10-08 10:00:07 {"client":"10.0.0.5","qname":"a.example.com."}',
-            ]
-        )
-        devices = {item["ip"]: item for item in self.app.parse_device_log_clients(logs)}
-        self.assertEqual(devices["10.0.0.5"]["last_seen"], "2026-10-08 10:00:09")
-        self.assertEqual(devices["10.0.0.5"]["query_count"], 3)
-
-    def test_domain_attribution_moves_bytes_off_gateway_without_double_counting(self):
-        gateway = "10.0.0.1"
-        phone = "10.0.0.5"
-        devices = {
-            gateway: device(gateway, traffic_download=1000, traffic_upload=100, connections=2, traffic_total=1100),
-            phone: device(phone, query_count=3, domain_count=1, domains=[{"domain": "video.example.com", "count": 3}]),
-        }
-        connections = [
-            {"metadata": {"sourceIP": gateway, "host": "cdn.video.example.com"}, "download": 600, "upload": 40},
-            {"metadata": {"sourceIP": gateway, "host": "unknown.invalid"}, "download": 400, "upload": 60},
-        ]
-        attributed = self.app.apply_domain_attributed_traffic(devices, connections, {gateway})
-
-        self.assertEqual(attributed, 1)
-        self.assertEqual(devices[phone]["traffic_download"], 600)
-        self.assertEqual(devices[phone]["traffic_upload"], 40)
-        self.assertEqual(devices[phone]["connections"], 1)
-        self.assertTrue(devices[phone]["traffic_estimated"])
-        self.assertEqual(devices[gateway]["traffic_download"], 400)
-        self.assertEqual(devices[gateway]["traffic_upload"], 60)
-        self.assertEqual(devices[gateway]["connections"], 1)
-        total = sum(int(item.get("traffic_total") or 0) for item in devices.values())
-        self.assertEqual(total, 1100)
-
-    def test_source_ip_ignores_host_and_inbound_fields(self):
-        self.assertEqual(
-            self.app.connection_source_ip({"metadata": {"host": "1.2.3.4:443", "inboundIp": "10.0.0.1", "inboundIP": "10.0.0.1"}}),
-            "",
-        )
-        self.assertEqual(self.app.connection_source_ip({"metadata": {"sourceIP": "10.0.0.7", "host": "1.2.3.4"}}), "10.0.0.7")
-        self.assertEqual(self.app.connection_source_ip({"sourceIP": "10.0.0.8:51000"}), "10.0.0.8")
-
-    def test_domain_cap_is_display_only(self):
-        lines = [
-            f'2026-10-08 10:00:{index:02d} {{"client":"10.0.0.9","qname":"host{index}.example.com."}}'
-            for index in range(15)
-        ]
-        devices = {item["ip"]: item for item in self.app.parse_device_log_clients("\n".join(lines))}
-        all_domains = devices["10.0.0.9"]["domains"]
-        self.assertEqual(len(all_domains), 15)
-        self.assertEqual(devices["10.0.0.9"]["domain_count"], 15)
-        # 归因索引用全部域名
-        index = self.app.device_domain_index(devices)
-        self.assertEqual(len(index), 15)
-        # 展示时截断到 12
-        self.assertEqual(len(self.app.display_domains(all_domains)), self.app.DEVICE_DOMAIN_DISPLAY_LIMIT)
-        self.assertEqual(self.app.DEVICE_DOMAIN_DISPLAY_LIMIT, 12)
 
     # --- 备份过滤 ---
 
@@ -265,12 +192,6 @@ class AppLogicTest(unittest.TestCase):
 
     # --- 其他纯函数 ---
 
-    def test_wildcard_controller_host_is_localized_by_hostname_only(self):
-        self.assertEqual(self.app.localize_wildcard_host("http://0.0.0.0:9090"), "http://127.0.0.1:9090")
-        self.assertEqual(self.app.localize_wildcard_host("http://[::]:9090"), "http://127.0.0.1:9090")
-        self.assertEqual(self.app.localize_wildcard_host("http://10.0.0.0:9090"), "http://10.0.0.0:9090")
-        self.assertEqual(self.app.localize_wildcard_host("http://10.0.0.0:9090/path"), "http://10.0.0.0:9090/path")
-
     def test_upstream_values_with_yaml_breaking_characters_are_rejected(self):
         self.assertIsNone(self.app.upstream_value_error("udp://1.1.1.1"))
         for bad in ('1.1.1.1" # x', "a\\b", "1.1.1.1 #c"):
@@ -303,6 +224,292 @@ class AppLogicTest(unittest.TestCase):
         self.assertEqual(self.app.parse_github_contents_text("not json"), "")
         self.assertEqual(self.app.parse_github_contents_text('{"encoding":"base64","content":"%%%"}'), "")
         self.assertEqual(self.app.parse_github_contents_text('{"encoding":"base64","content":"aGk="}'), "hi")
+
+
+    # --- v0.3.31：上游地址校验 ---
+
+    def test_normalize_upstream_accepts_supported_schemes_and_brackets_ipv6(self):
+        normalize = self.app.normalize_upstream
+        self.assertEqual(normalize("223.5.5.5", default_scheme="udp"), ("udp://223.5.5.5", None))
+        self.assertEqual(normalize("2400:3200::1", default_scheme="udp"), ("udp://[2400:3200::1]", None))
+        self.assertEqual(normalize("[2400:3200::1]:853", default_scheme="udp"), ("udp://[2400:3200::1]:853", None))
+        self.assertEqual(normalize("tls://dns.alidns.com"), ("tls://dns.alidns.com", None))
+        self.assertEqual(normalize("https://dns.google/dns-query"), ("https://dns.google/dns-query", None))
+        self.assertEqual(normalize("tcp+pipeline://1.1.1.1"), ("tcp+pipeline://1.1.1.1", None))
+        # 国外上游不补协议，只补端口，和模板里 "8.8.8.8:53" 的写法一致
+        self.assertEqual(normalize("8.8.8.8", default_port=53), ("8.8.8.8:53", None))
+        self.assertEqual(normalize("8.8.8.8:53", default_port=53), ("8.8.8.8:53", None))
+        self.assertEqual(normalize("2001:4860:4860::8888", default_port=53), ("[2001:4860:4860::8888]:53", None))
+
+    def test_normalize_upstream_rejects_bad_scheme_whitespace_and_empty_host(self):
+        normalize = self.app.normalize_upstream
+        for bad in ("http://1.1.1.1", "doh://x"):
+            value, error = normalize(bad)
+            self.assertEqual(value, "")
+            self.assertIn("不支持的协议", error)
+            for scheme in self.app.UPSTREAM_SCHEMES:
+                self.assertIn(scheme, error)
+        self.assertEqual(normalize("dns.google 53")[1], "不能包含空格")
+        self.assertEqual(normalize("")[1], "不能为空")
+        self.assertEqual(normalize("tls://")[1], "缺少主机名或 IP")
+        self.assertIsNotNone(normalize("udp://[::1")[1])
+        self.assertIsNotNone(self.app.upstream_value_error("http://1.1.1.1"))
+
+    def test_display_upstream_round_trip(self):
+        display = self.app.display_upstream
+        self.assertEqual(display("udp://x", "udp"), "x")
+        self.assertEqual(display("8.8.8.8:53", None), "8.8.8.8")
+        self.assertEqual(display("udp://[2400:3200::1]", "udp"), "[2400:3200::1]")
+        self.assertEqual(display("tls://dns.alidns.com", "udp"), "tls://dns.alidns.com")
+        # 显示值再保存回去得到同样的原始值
+        self.assertEqual(self.app.normalize_upstream(display("udp://[2400:3200::1]", "udp"), default_scheme="udp")[0], "udp://[2400:3200::1]")
+        self.assertEqual(self.app.normalize_upstream(display("8.8.8.8:53", None), default_port=53)[0], "8.8.8.8:53")
+
+    # --- v0.3.31：规则文件格式校验 ---
+
+    def test_hosts_rule_validation(self):
+        check = self.app.hosts_rule_error
+        self.assertIsNone(check("# 注释\n\nnas.lan 10.10.30.10\ndomain:home.lan 10.10.30.1 fd00::1 # 行内注释\n"))
+        self.assertEqual(check("nas.lan 10.0.0.1\n10.0.0.2 router.lan"), "格式是「域名 IP」，不是「IP 域名」（第 2 行）")
+        self.assertIn("第 1 行", check("nas.lan"))
+        self.assertIn("10.0.0.x", check("nas.lan 10.0.0.x"))
+        self.assertEqual(self.app.rule_content_error("hosts", "10.0.0.1 nas.lan"), "格式是「域名 IP」，不是「IP 域名」（第 1 行）")
+
+    def test_domain_rule_validation(self):
+        check = self.app.domain_rule_error
+        self.assertIsNone(check("qq.com\nfull:a.b.c # ok\nkeyword:cdn\nregexp:^a\\.b$\n# 注释\n"))
+        self.assertIn("第 2 行", check("qq.com\nbad domain here"))
+        self.assertIn("第 1 行", check("domain:"))
+        self.assertIsNone(self.app.rule_content_error("force-nocn", "github.com"))
+        self.assertIsNotNone(self.app.rule_content_error("force-cn", "a b"))
+
+    # --- v0.3.31：写配置前先校验 ---
+
+    def _write_config(self, rules_dir):
+        config = (
+            'log:\n  level: info\n  file: "/var/log/mosdns.log"\n\napi:\n  http: "127.0.0.1:8080"\n\nplugins:\n'
+            '  - tag: cache\n    type: cache\n    args:\n      lazy_cache_ttl: 86400\n      dump_file: "/etc/mosdns/cache.dump"\n'
+            '  - tag: forward_local\n    type: forward\n    args:\n      upstreams:\n        - addr: "udp://119.29.29.29" # TAG_LOCAL\n'
+            '  - tag: forward_remote\n    type: forward\n    args:\n      upstreams:\n        - addr: "8.8.8.8:53" # TAG_REMOTE\n'
+            f'  - tag: hosts\n    type: hosts\n    args:\n      files:\n        - "{rules_dir}/hosts.txt"\n'
+            f'  - tag: force_cn\n    type: domain_set\n    args:\n      files:\n        - "{rules_dir}/force-cn.txt"\n'
+        )
+        Path(self.app.CONFIG_FILE).write_text(config, encoding="utf-8")
+        return config
+
+    def test_save_rule_content_validates_in_sandbox_before_writing(self):
+        rules_dir = Path(self.app.RULE_FILES["hosts"]["path"]).parent
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        (rules_dir / "force-cn.txt").write_text("qq.com\n", encoding="utf-8")
+        self._write_config(str(rules_dir))
+        seen = {}
+
+        def fake_config_starts(path, wait_seconds=3.0):
+            text = Path(path).read_text(encoding="utf-8")
+            seen["text"] = text
+            match = re.search(r'- "([^"]+/rules/hosts\.txt)"', text)
+            seen["candidate"] = Path(match.group(1)).read_text(encoding="utf-8") if match else ""
+            other = re.search(r'- "([^"]+/rules/force-cn\.txt)"', text)
+            seen["other_is_link"] = os.path.islink(other.group(1)) if other else None
+            return seen.get("result", (True, "配置可以启动"))
+
+        self.app.config_starts = fake_config_starts
+        # 格式错误：连沙箱都不用起
+        ok, message, rollback = self.app.save_rule_content("hosts", "10.0.0.1 nas.lan")
+        self.assertFalse(ok)
+        self.assertIn("不是「IP 域名」", message)
+        self.assertNotIn("text", seen)
+        self.assertFalse((rules_dir / "hosts.txt").exists())
+
+        # 沙箱校验失败：不写文件，返回 mosdns 的输出
+        seen["result"] = (False, "fatal: bad hosts line")
+        ok, message, rollback = self.app.save_rule_content("hosts", "nas.lan 10.0.0.1\n")
+        self.assertFalse(ok)
+        self.assertIn("fatal: bad hosts line", message)
+        self.assertFalse((rules_dir / "hosts.txt").exists())
+        # 校验用的配置指向临时目录里的候选文件，其他规则文件是指回原文件的链接
+        self.assertNotIn(f'"{rules_dir}/hosts.txt"', seen["text"])
+        self.assertEqual(seen["candidate"], "nas.lan 10.0.0.1\n")
+        self.assertTrue(seen["other_is_link"])
+
+        # 校验通过才写入
+        seen["result"] = (True, "ok")
+        ok, message, rollback = self.app.save_rule_content("hosts", "nas.lan 10.0.0.1\n")
+        self.assertTrue(ok)
+        self.assertEqual((rules_dir / "hosts.txt").read_text(encoding="utf-8"), "nas.lan 10.0.0.1\n")
+        self.assertEqual(rollback, (None, str(rules_dir / "hosts.txt")))
+
+    def test_update_config_values_validates_before_writing_and_restarting(self):
+        original = self._write_config(f"{self.tmp.name}/rules")
+        calls = []
+        self.app.config_starts = lambda path, wait_seconds=3.0: (False, "line1\nplugin forward: invalid addr")
+        self.app.restart_mosdns = lambda: calls.append("restart") or (True, "")
+
+        ok, message = self.app.update_config_values("1.1.1.1", "8.8.4.4", "3600")
+        self.assertFalse(ok)
+        self.assertIn("未保存", message)
+        self.assertIn("plugin forward: invalid addr", message)
+        self.assertEqual(Path(self.app.CONFIG_FILE).read_text(encoding="utf-8"), original)
+        self.assertEqual(calls, [])
+
+        self.assertEqual(self.app.update_config_values("http://1.1.1.1", "8.8.4.4", "3600")[1][:7], "国内 DNS ")
+        self.assertEqual(Path(self.app.CONFIG_FILE).read_text(encoding="utf-8"), original)
+
+        self.app.config_starts = lambda path, wait_seconds=3.0: (True, "ok")
+        ok, message = self.app.update_config_values("2400:3200::1", "8.8.4.4", "3600")
+        self.assertTrue(ok, message)
+        text = Path(self.app.CONFIG_FILE).read_text(encoding="utf-8")
+        self.assertIn('- addr: "udp://[2400:3200::1]" # TAG_LOCAL', text)
+        self.assertIn('- addr: "8.8.4.4:53" # TAG_REMOTE', text)
+        self.assertIn("lazy_cache_ttl: 3600", text)
+        self.assertEqual(calls, ["restart"])
+
+    def test_restore_backup_validates_backup_before_touching_config(self):
+        original = self._write_config(f"{self.tmp.name}/rules")
+        backup_dir = Path(self.app.BACKUP_DIR)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        (backup_dir / "config.20261008100000.bak").write_text("broken: [\n", encoding="utf-8")
+        checked = []
+        self.app.config_starts = lambda path, wait_seconds=3.0: checked.append(path) or (False, "yaml: line 1: did not find expected node")
+        self.app.restart_mosdns = lambda: (True, "")
+
+        ok, message = self.app.restore_backup("config.20261008100000.bak")
+        self.assertFalse(ok)
+        self.assertIn("未恢复", message)
+        self.assertIn("did not find expected node", message)
+        self.assertEqual(checked, [os.path.realpath(backup_dir / "config.20261008100000.bak")])
+        self.assertEqual(Path(self.app.CONFIG_FILE).read_text(encoding="utf-8"), original)
+
+    def test_restart_resets_failed_state_first_and_tail_lines_trims(self):
+        commands = []
+        self.app.run_cmd = lambda args, timeout=60: commands.append(args) or (True, "")
+        self.app.restart_mosdns()
+        self.assertEqual(commands, [["systemctl", "reset-failed", "mosdns"], ["systemctl", "restart", "mosdns"]])
+        self.assertEqual(self.app.tail_lines("\n".join(str(i) for i in range(40)), 15), "\n".join(str(i) for i in range(25, 40)))
+
+    def test_flush_cache_uses_api_then_falls_back_to_dump_and_restart(self):
+        self._write_config(f"{self.tmp.name}/rules")
+        self.assertEqual(self.app.config_api_address(), "127.0.0.1:8080")
+        self.assertEqual(self.app.config_cache_tag(), "cache")
+        self.assertEqual(self.app.config_dump_file(), "/etc/mosdns/cache.dump")
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        urls = []
+        restarts = []
+        self.app.urlrequest = types.SimpleNamespace(
+            Request=lambda url, headers=None: url,
+            urlopen=lambda url, timeout=5: urls.append(url) or FakeResponse(),
+        )
+        self.app.restart_mosdns = lambda: restarts.append(1) or (True, "")
+        ok, message = self.app.flush_cache()
+        self.assertTrue(ok)
+        self.assertEqual(urls, ["http://127.0.0.1:8080/plugins/cache/flush"])
+        self.assertEqual(restarts, [])
+        self.assertIn("无需重启", message)
+
+        dump = Path(self.tmp.name) / "cache.dump"
+        dump.write_text("x", encoding="utf-8")
+        Path(self.app.CONFIG_FILE).write_text(
+            Path(self.app.CONFIG_FILE).read_text(encoding="utf-8").replace("/etc/mosdns/cache.dump", str(dump)), encoding="utf-8"
+        )
+
+        def failing_urlopen(url, timeout=5):
+            raise OSError("connection refused")
+
+        self.app.urlrequest = types.SimpleNamespace(Request=lambda url, headers=None: url, urlopen=failing_urlopen)
+        ok, message = self.app.flush_cache()
+        self.assertTrue(ok)
+        self.assertFalse(dump.exists())
+        self.assertEqual(restarts, [1])
+        self.assertIn("connection refused", message)
+
+    def test_broadcast_rule_is_silent_when_sync_disabled(self):
+        self.app.write_env({"RULE_SYNC_ENABLED": "false"})
+        self.assertEqual(self.app.broadcast_rule("force-cn", "qq.com"), "")
+        self.assertEqual(self.app.broadcast_rule("hosts", "nas.lan 10.0.0.1"), "")
+
+    # --- v0.3.31：运行维护 ---
+
+    def test_crontab_binary_missing_is_reported_not_raised(self):
+        def missing_run(args, **kwargs):
+            raise FileNotFoundError("crontab")
+
+        self.app.subprocess.run = missing_run
+        try:
+            self.assertEqual(self.app.read_crontab_state(), ([], False))
+            self.assertEqual(self.app.read_crontab_lines(), [])
+            schedule = self.app.read_geo_schedule()
+            self.assertEqual(schedule["mode"], "disabled")
+            ok, message = self.app.write_geo_schedule({"mode": "daily", "time": "02:00"})
+            self.assertFalse(ok)
+            self.assertIn("crontab", message)
+            self.app.run_cmd = lambda args, timeout=60: (False, "")
+            status = self.app.geo_update_status()
+            self.assertFalse(status["cron_available"])
+            self.assertFalse(status["cron_service_active"])
+            self.assertIsNone(status["last_run"])
+            self.assertEqual([item["name"] for item in status["files"]], ["geosite_cn.txt", "geosite_no_cn.txt"])
+        finally:
+            self.app.subprocess.run = __import__("subprocess").run
+
+    def test_parse_geo_update_log_reads_last_block(self):
+        log = "\n".join(
+            [
+                "===== 2026-10-07 02:00:01 更新 Geo 规则 =====",
+                "\x1b[1;33m⬇️  正在更新 GeoSite...\x1b[0m",
+                " - geosite_cn.txt",
+                "❌ 下载失败：https://example/x",
+                "===== 结果: 失败 =====",
+                "===== 2026-10-08 02:00:01 更新 Geo 规则 =====",
+                "⬇️  正在更新 GeoSite...",
+                " - geosite_cn.txt",
+                " - geosite_no_cn.txt",
+                "✅ 规则更新完毕！",
+                "===== 结果: 成功 =====",
+                "",
+            ]
+        )
+        parsed = self.app.parse_geo_update_log(log)
+        self.assertEqual(parsed["at"], int(time.mktime(time.strptime("2026-10-08 02:00:01", "%Y-%m-%d %H:%M:%S"))))
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["summary"], ["⬇️  正在更新 GeoSite...", " - geosite_cn.txt", " - geosite_no_cn.txt", "✅ 规则更新完毕！"])
+        failed = self.app.parse_geo_update_log(log.split("===== 2026-10-08")[0])
+        self.assertFalse(failed["ok"])
+        self.assertNotIn("\x1b", "".join(failed["summary"]))
+        # 老版本 CLI 没有结果行：ok 未知
+        self.assertIsNone(self.app.parse_geo_update_log("===== 2026-10-08 02:00:01 更新 Geo 规则 =====\nhello\n")["ok"])
+        self.assertIsNone(self.app.parse_geo_update_log(""))
+        self.assertEqual(len(self.app.parse_geo_update_log("===== 2026-10-08 02:00:01 更新 Geo 规则 =====\n" + "\n".join(f"l{i}" for i in range(20)))["summary"]), 8)
+        self.assertEqual(self.app.read_tail_text(f"{self.tmp.name}/missing.log"), "")
+
+    def test_timestamps_are_epoch_or_iso_with_offset(self):
+        target = Path(self.tmp.name) / "config.20261008100000.bak"
+        target.write_text("x", encoding="utf-8")
+        item = self.app.list_backup_files([str(target)])[0]
+        self.assertIsInstance(item["mtime"], int)
+        self.assertNotIn("mtime_text", item)
+
+        health = self.app.service_health_summary(True, True, False, {"local_dns": "a", "remote_dns": "b", "ttl": "1"})
+        self.assertIsInstance(health["last_checked"], int)
+
+        info = self.app.server_time_info()
+        self.assertIsInstance(info["server_time"], int)
+        self.assertIsInstance(info["server_utc_offset"], int)
+        self.assertRegex(info["server_tz"], r"UTC[+-]\d\d:\d\d")
+
+        logs = self.app.normalize_log_timestamps(
+            "2026-10-08T07:12:01.123+0800\tinfo\tx\n2026-10-08T07:12:01Z\tinfo\ty\nplain line"
+        )
+        self.assertEqual(logs.splitlines(), ["2026-10-08T07:12:01+08:00\tinfo\tx", "2026-10-08T07:12:01+00:00\tinfo\ty", "plain line"])
+        self.assertEqual(self.app.parse_log_entries(logs)[0]["time"], "2026-10-08T07:12:01+08:00")
 
 
 if __name__ == "__main__":

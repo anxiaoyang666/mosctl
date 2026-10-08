@@ -433,8 +433,9 @@ class AppLogicTest(unittest.TestCase):
 
     def test_broadcast_rule_is_silent_when_sync_disabled(self):
         self.app.write_env({"RULE_SYNC_ENABLED": "false"})
-        self.assertEqual(self.app.broadcast_rule("force-cn", "qq.com"), "")
-        self.assertEqual(self.app.broadcast_rule("hosts", "nas.lan 10.0.0.1"), "")
+        self.assertEqual(self.app.start_broadcast("force-cn", "qq.com"), (None, ""))
+        self.assertEqual(self.app.start_broadcast("hosts", "nas.lan 10.0.0.1"), (None, ""))
+        self.assertEqual(self.app.SYNC_JOBS, [])
 
     # --- v0.3.31：运行维护 ---
 

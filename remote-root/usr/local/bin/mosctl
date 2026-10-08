@@ -113,12 +113,15 @@ geo_url() {
     echo "$value"
 }
 
-# 只有标准输出是终端时才显示进度；cron 里跑时进度点会把日志刷满
+# 只有标准输出是终端时才显示进度；cron 里跑时进度点会把日志刷满。
+# 必须带超时：GitHub 域名可能被解析成 fake-ip 交给代理，节点不可用时连接会一直挂着，
+# 没有超时就永远走不到"直连失败改走 GH_PROXY"那一步，定时任务也会卡死。
+WGET_TIMEOUT_OPTS=(--timeout=20 --tries=2)
 wget_fetch() {
     if [ -t 1 ]; then
-        wget -q --show-progress --progress=dot:mega -O "$1" "$2"
+        wget -q "${WGET_TIMEOUT_OPTS[@]}" --show-progress --progress=dot:mega -O "$1" "$2"
     else
-        wget -q -O "$1" "$2"
+        wget -q "${WGET_TIMEOUT_OPTS[@]}" -O "$1" "$2"
     fi
 }
 

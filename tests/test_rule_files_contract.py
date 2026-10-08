@@ -48,3 +48,13 @@ class RuleFilesContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DownloadTimeoutContractTest(unittest.TestCase):
+    def test_geo_downloads_have_a_timeout(self):
+        text = CLI.read_text(encoding="utf-8")
+        self.assertIn('WGET_TIMEOUT_OPTS=(--timeout=20 --tries=2)', text)
+        body = text[text.find("wget_fetch() {"):]
+        body = body[:body.find("\n}\n")]
+        self.assertEqual(body.count('"${WGET_TIMEOUT_OPTS[@]}"'), 2, "两个 wget 分支都要带超时")
+

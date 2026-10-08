@@ -5,7 +5,7 @@ After=network.target mosdns.service
 [Service]
 Type=simple
 WorkingDirectory=/etc/mosdns/manager
-EnvironmentFile=-/etc/mosdns/.env
+# app.py 自己读 /etc/mosdns/.env；不再用 EnvironmentFile 注入，避免密钥被每个子进程继承
 ExecStart=/usr/bin/python3 /etc/mosdns/manager/app.py
 Restart=on-failure
 RestartSec=3s

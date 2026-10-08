@@ -7,14 +7,16 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
+import threading
 import time
 from urllib import error, request as urlrequest
 import json
 import stat
 import tempfile
 import zipfile
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from flask import Flask, jsonify, redirect, render_template, request, session
 
@@ -33,6 +35,13 @@ SYSTEMD_DIR = "/etc/systemd/system"
 RESCUE_DNS = "223.5.5.5"
 DEFAULT_BACKUP_KEEP_COUNT = 20
 KERNEL_BACKUP_KEEP_COUNT = 3
+# 备份文件按前缀分三类，互不混在同一个列表或保留数里：
+#   config.<stamp>.bak            配置备份（旧版叫 config.yaml.<stamp>.bak，仍可识别）
+#   rule-<id>.<stamp>.bak         规则文件备份（旧版叫 <file>.txt.<stamp>.bak，不再列出）
+#   mosdns-bin.<stamp>            内核备份（旧版叫 mosdns-bin.<stamp>.bak，仍可识别）
+CONFIG_BACKUP_PREFIX = "config."
+RULE_BACKUP_PREFIX = "rule-"
+KERNEL_BACKUP_PREFIX = "mosdns-bin."
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d))(.*)$")
 SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}
@@ -42,9 +51,28 @@ GEO_UPDATE_COMMAND = f"{MOSCTL} update"
 GEO_CRON_COMMENT = "# MosDNS Web: Geo update schedule"
 DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
-PANEL_VERSION = "0.3.26"
+# .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
+DEFAULT_GH_PROXY = "https://gh-proxy.com/"
+PANEL_VERSION = "0.3.27"
 PANEL_UPGRADE_EXCLUDES = (ENV_FILE, CONFIG_FILE, f"{MOSDNS_DIR}/rules", "/etc/mosdns/rules")
 PANEL_BACKUP_KEEP_COUNT = 3
+# 设备页只展示每台设备最常查询的前 N 个域名；归因时仍使用全部域名
+DEVICE_DOMAIN_DISPLAY_LIMIT = 12
+# 下载上限：内核 zip 约 5 MB、面板源码 zip 约 2 MB，100 MB 足够且能挡住异常响应
+DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
+DOWNLOAD_TIME_BUDGET = 300
+REMOTE_VERSION_CACHE_TTL = 3600
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCK_SECONDS = 60
+# 同一时间只允许一个会改写配置/重启服务的操作；.env 的读改写用单独的锁，
+# 避免保存账号设置被一次长达数分钟的 Geo 更新阻塞
+OPERATION_LOCK = threading.Lock()
+ENV_LOCK = threading.Lock()
+REMOTE_VERSION_LOCK = threading.Lock()
+REMOTE_VERSION_CACHE = {"key": "", "at": 0.0, "result": None}
+LOGIN_FAILURES_LOCK = threading.Lock()
+LOGIN_FAILURES = {}
+OPERATION_BUSY_MESSAGE = "操作进行中，请稍后再试"
 
 RULE_FILES = {
     "force-cn": {
@@ -87,6 +115,31 @@ RULE_FILES = {
 
 app = Flask(__name__)
 app.permanent_session_lifetime = timedelta(days=365)
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+
+
+def json_body():
+    # 所有 POST 接口都走这里：非 JSON、非对象的请求体一律当作空对象
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def operation_locked(func):
+    # 控制/升级/配置写入互斥；GET 不加锁。非阻塞获取，拿不到锁直接提示稍后再试
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return func(*args, **kwargs)
+        if not OPERATION_LOCK.acquire(blocking=False):
+            return jsonify({"success": False, "message": OPERATION_BUSY_MESSAGE}), 409
+        try:
+            return func(*args, **kwargs)
+        finally:
+            OPERATION_LOCK.release()
+
+    return wrapper
 
 
 def clean_output(text):
@@ -259,21 +312,34 @@ def config_value(key):
     return match.group(1).strip() if match else ""
 
 
+def localize_wildcard_host(url):
+    # 控制器监听在 0.0.0.0 / [::] 时本机要用回环地址访问。只比较 hostname，
+    # 不能对整个 URL 做字符串替换，否则 10.0.0.0 这类地址会被改坏
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if parts.hostname not in ("0.0.0.0", "::"):
+        return url
+    netloc = "127.0.0.1"
+    if parts.port is not None:
+        netloc += f":{parts.port}"
+    if parts.username:
+        auth = parts.username + (f":{parts.password}" if parts.password else "")
+        netloc = f"{auth}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def mihomo_controller_settings():
     env = read_env()
-    controller = (
-        os.environ.get("MIHOMO_CONTROLLER")
-        or env.get("MIHOMO_CONTROLLER")
-        or env.get("MIHOMO_CONTROLLER_URL")
-        or "127.0.0.1:9090"
-    )
+    controller = env.get("MIHOMO_CONTROLLER") or env.get("MIHOMO_CONTROLLER_URL") or "127.0.0.1:9090"
     controller = str(controller).strip().strip('"').strip("'")
     if controller.startswith(":"):
         controller = "127.0.0.1" + controller
     if "://" not in controller:
         controller = "http://" + controller
-    controller = controller.replace("0.0.0.0", "127.0.0.1").replace("[::]", "127.0.0.1")
-    secret = os.environ.get("MIHOMO_API_SECRET") or env.get("MIHOMO_API_SECRET") or env.get("MIHOMO_SECRET") or ""
+    controller = localize_wildcard_host(controller)
+    secret = env.get("MIHOMO_API_SECRET") or env.get("MIHOMO_SECRET") or ""
     return {"base_url": controller.rstrip("/"), "secret": secret}
 
 
@@ -300,7 +366,6 @@ def write_mihomo_settings(data):
     if secret or data.get("clear_secret"):
         updates["MIHOMO_API_SECRET"] = secret
     write_env(updates)
-    os.environ.update(updates)
     return True, "mihomo 控制器设置已保存"
 
 
@@ -339,9 +404,13 @@ def normalize_connection_ip(value):
 
 
 def connection_source_ip(connection):
-    metadata = connection.get("metadata") if isinstance(connection, dict) else {}
-    if not isinstance(metadata, dict):
+    # 只看真正表示来源地址的字段。metadata.host 是目标域名、inboundIp 是
+    # 入站监听地址，对它们跑 IPv4 正则会把目标/网关地址当成来源设备
+    if not isinstance(connection, dict):
         return ""
+    metadata = connection.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
     candidates = [
         connection.get("sourceIP"),
         connection.get("sourceIp"),
@@ -363,9 +432,6 @@ def connection_source_ip(connection):
         metadata.get("clientIp"),
         metadata.get("client_ip"),
         metadata.get("client"),
-        metadata.get("inboundIp"),
-        metadata.get("inboundIP"),
-        metadata.get("host"),
     ]
     for candidate in candidates:
         ip = normalize_connection_ip(candidate)
@@ -498,6 +564,10 @@ def apply_domain_attributed_traffic(devices_by_ip, connections, known_source_ips
         if len(candidate_ips) != 1:
             continue
         target_ip = next(iter(candidate_ips))
+        if target_ip == source_ip:
+            continue
+        download = first_number(connection.get("download"))
+        upload = first_number(connection.get("upload"))
         item = devices_by_ip.setdefault(
             target_ip,
             {
@@ -509,11 +579,17 @@ def apply_domain_attributed_traffic(devices_by_ip, connections, known_source_ips
                 "domains": [],
             },
         )
-        item["traffic_download"] = int(item.get("traffic_download") or 0) + first_number(connection.get("download"))
-        item["traffic_upload"] = int(item.get("traffic_upload") or 0) + first_number(connection.get("upload"))
+        item["traffic_download"] = int(item.get("traffic_download") or 0) + download
+        item["traffic_upload"] = int(item.get("traffic_upload") or 0) + upload
         item["connections"] = int(item.get("connections") or 0) + 1
         item["traffic_total"] = int(item.get("traffic_download") or 0) + int(item.get("traffic_upload") or 0)
         item["traffic_estimated"] = True
+        # 这条连接的流量已经算到目标设备头上，从网关来源里扣掉，避免总量翻倍
+        if source_item:
+            source_item["traffic_download"] = max(0, int(source_item.get("traffic_download") or 0) - download)
+            source_item["traffic_upload"] = max(0, int(source_item.get("traffic_upload") or 0) - upload)
+            source_item["connections"] = max(0, int(source_item.get("connections") or 0) - 1)
+            source_item["traffic_total"] = int(source_item.get("traffic_download") or 0) + int(source_item.get("traffic_upload") or 0)
         attributed_connections += 1
     return attributed_connections
 
@@ -635,20 +711,28 @@ def parse_device_log_clients(text):
             },
         )
         item["query_count"] += 1
-        if timestamp_match and not item["last_seen"]:
-            item["last_seen"] = timestamp_match.group(1).replace("T", " ")
+        if timestamp_match:
+            # 日志可能是倒序或乱序，last_seen 取最大时间戳而不是第一条
+            seen = timestamp_match.group(1).replace("T", " ")
+            if seen > item["last_seen"]:
+                item["last_seen"] = seen
         if qname_match:
             domain = qname_match.group(1).rstrip(".")
             item["last_query"] = domain
             item["domains"][domain] = item["domains"].get(domain, 0) + 1
             item["domain_count"] = len(item["domains"])
 
+    # 这里保留全部域名供流量归因索引使用，展示时再由 display_domains 截断
     for item in devices.values():
         item["domains"] = [
             {"domain": domain, "count": count}
-            for domain, count in sorted(item["domains"].items(), key=lambda entry: entry[1], reverse=True)[:12]
+            for domain, count in sorted(item["domains"].items(), key=lambda entry: entry[1], reverse=True)
         ]
     return list(devices.values())
+
+
+def display_domains(domains, limit=DEVICE_DOMAIN_DISPLAY_LIMIT):
+    return list(domains or [])[:limit]
 
 
 def read_neighbor_table():
@@ -762,7 +846,7 @@ def collect_devices():
                 "domain_count": int(item.get("domain_count") or 0),
                 "domains": [
                     {**domain, "route": classify_device_domain(domain.get("domain", ""), force_cn, force_nocn)}
-                    for domain in item.get("domains", [])
+                    for domain in display_domains(item.get("domains", []))
                 ],
                 "traffic_download": int(item.get("traffic_download") or 0),
                 "traffic_upload": int(item.get("traffic_upload") or 0),
@@ -800,8 +884,8 @@ ENV_VALUE_FORBIDDEN = '"\\$`\r\n\x00'
 
 
 def env_value_error(value):
-    # .env 会被 bash、systemd EnvironmentFile 和 read_env 三种方式解析，
-    # 这几个字符在三者之间语义不一致，还可能被当作命令执行，统一拒绝。
+    # .env 会被 install.sh/mosctl（grep 取值）和 read_env 两种方式解析，
+    # 这几个字符在二者之间语义不一致，还可能被当作命令执行，统一拒绝。
     if not isinstance(value, str):
         return "值必须是字符串"
     for char in ENV_VALUE_FORBIDDEN:
@@ -815,32 +899,41 @@ def write_env(updates):
         error = env_value_error(value)
         if error:
             raise ValueError(f"{key}: {error}")
-    os.makedirs(MOSDNS_DIR, exist_ok=True)
-    lines = []
-    if os.path.exists(ENV_FILE):
-        with open(ENV_FILE, "r", encoding="utf-8") as file:
-            lines = file.readlines()
+    # 读-改-写在锁内完成，写入先落到临时文件再原子替换，避免并发请求互相覆盖或写出半个文件
+    with ENV_LOCK:
+        os.makedirs(MOSDNS_DIR, exist_ok=True)
+        lines = []
+        if os.path.exists(ENV_FILE):
+            with open(ENV_FILE, "r", encoding="utf-8") as file:
+                lines = file.readlines()
 
-    seen = set()
-    with open(ENV_FILE, "w", encoding="utf-8") as file:
+        seen = set()
+        output = []
         for line in lines:
             stripped = line.strip()
             if "=" in stripped and not stripped.startswith("#"):
                 key = stripped.split("=", 1)[0].strip()
                 if key in updates:
-                    file.write(f'{key}="{updates[key]}"\n')
+                    output.append(f'{key}="{updates[key]}"\n')
                     seen.add(key)
-                else:
-                    file.write(line)
-            else:
-                file.write(line)
+                    continue
+            output.append(line)
+        # 手工编辑过的 .env 可能没有结尾换行，追加新键前先补上，避免粘到上一行
+        if output and not output[-1].endswith("\n"):
+            output[-1] += "\n"
         for key, value in updates.items():
             if key not in seen:
-                file.write(f'{key}="{value}"\n')
-    try:
-        os.chmod(ENV_FILE, 0o600)
-    except OSError:
-        pass
+                output.append(f'{key}="{value}"\n')
+
+        tmp_file = f"{ENV_FILE}.webtmp"
+        fd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write("".join(output))
+        os.replace(tmp_file, ENV_FILE)
+        try:
+            os.chmod(ENV_FILE, 0o600)
+        except OSError:
+            pass
 
 
 def ensure_env():
@@ -863,10 +956,76 @@ def ensure_env():
     if updates:
         write_env(updates)
         env.update(updates)
-    app.secret_key = os.environ.get("WEB_SESSION_SECRET") or env["WEB_SESSION_SECRET"]
+    app.secret_key = env["WEB_SESSION_SECRET"]
+
+
+def gh_proxy_prefix():
+    # 代理前缀只从 .env 读：键不存在用默认值，键存在但为空表示不走代理
+    env = read_env()
+    if "GH_PROXY" not in env:
+        return DEFAULT_GH_PROXY
+    prefix = env.get("GH_PROXY", "").strip()
+    if not prefix:
+        return ""
+    if not prefix.startswith(("http://", "https://")):
+        return ""
+    return prefix if prefix.endswith("/") else prefix + "/"
+
+
+def github_url_candidates(url):
+    # 先直连 GitHub，失败再退到代理；代理只用于 GitHub 域名
+    urls = [url]
+    prefix = gh_proxy_prefix()
+    if prefix and url.startswith(("https://github.com/", "https://raw.githubusercontent.com/", "https://api.github.com/")):
+        urls.append(prefix + url)
+    return urls
 
 
 ensure_env()
+
+
+@app.before_request
+def require_ajax_header_for_api_writes():
+    # 浏览器表单/跨站请求带不上自定义头，用它挡住 CSRF。
+    # /api/rule-sync 是节点间调用、用同步密钥鉴权，不需要这个头
+    if not request.path.startswith("/api/") or request.path == "/api/rule-sync":
+        return None
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    if request.headers.get("X-Requested-With", "") != "XMLHttpRequest":
+        return jsonify({"success": False, "message": "缺少 X-Requested-With 请求头"}), 403
+    return None
+
+
+def client_address():
+    return request.remote_addr or "unknown"
+
+
+def login_locked_seconds(address):
+    with LOGIN_FAILURES_LOCK:
+        count, lock_until, _ = LOGIN_FAILURES.get(address, (0, 0.0, 0.0))
+    remaining = int(lock_until - time.time())
+    return remaining if count >= LOGIN_MAX_FAILURES and remaining > 0 else 0
+
+
+def record_login_failure(address):
+    # 内存里按来源 IP 记 (失败次数, 锁定截止, 最后失败时间)；超过 5 次锁 60 秒
+    now = time.time()
+    with LOGIN_FAILURES_LOCK:
+        # 顺手清掉一小时没动静的条目，避免字典无限增长
+        for key in [key for key, (_, _, last_at) in LOGIN_FAILURES.items() if now - last_at > 3600]:
+            LOGIN_FAILURES.pop(key, None)
+        count, lock_until, _ = LOGIN_FAILURES.get(address, (0, 0.0, 0.0))
+        if lock_until and lock_until < now and count >= LOGIN_MAX_FAILURES:
+            count = 0
+        count += 1
+        lock_until = now + LOGIN_LOCK_SECONDS if count >= LOGIN_MAX_FAILURES else 0.0
+        LOGIN_FAILURES[address] = (count, lock_until, now)
+
+
+def clear_login_failures(address):
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.pop(address, None)
 
 
 def login_required(func):
@@ -946,7 +1105,51 @@ def restart_mosdns():
     return run_cmd(["systemctl", "restart", "mosdns"], timeout=30)
 
 
-def config_starts(path):
+def free_local_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def port_open(port, timeout=0.3):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def sandbox_config_text(content, tmpdir):
+    # 校验用的副本不能碰正在运行的 mosdns：所有 listen 改到回环随机端口、
+    # 日志和缓存 dump 指到临时目录、api 监听在一个可探测的本地端口
+    api_port = free_local_port()
+
+    def replace_listen(match):
+        return f'{match.group(1)}"127.0.0.1:{free_local_port()}"'
+
+    content = re.sub(r'(?m)^(\s*listen:\s*)["\']?[^"\'#\n]*["\']?\s*$', replace_listen, content)
+    content = re.sub(
+        r'(?m)^(\s*http:\s*)["\']?[^"\'#\n]+["\']?\s*$',
+        lambda match: f'{match.group(1)}"127.0.0.1:{api_port}"',
+        content,
+        count=1,
+    )
+    log_path = os.path.join(tmpdir, "mosdns.log")
+    dump_path = os.path.join(tmpdir, "cache.dump")
+    content = re.sub(
+        r'(?m)^(\s*file:\s*)["\']?[^"\'#\n]+["\']?\s*$',
+        lambda match: f'{match.group(1)}"{log_path}"',
+        content,
+    )
+    content = re.sub(
+        r'(?m)^(\s*dump_file:\s*)["\']?[^"\'#\n]+["\']?\s*$',
+        lambda match: f'{match.group(1)}"{dump_path}"',
+        content,
+    )
+    return content, api_port
+
+
+def config_starts(path, wait_seconds=3.0):
     proc = None
     tmpdir = None
     try:
@@ -954,12 +1157,7 @@ def config_starts(path):
         check_path = os.path.join(tmpdir, "config.yaml")
         with open(path, "r", encoding="utf-8") as source:
             content = source.read()
-        content = re.sub(
-            r'(?m)^(\s*http:\s*)["\']?[^"\'\n]+["\']?\s*$',
-            r'\g<1>"127.0.0.1:0"',
-            content,
-            count=1,
-        )
+        content, api_port = sandbox_config_text(content, tmpdir)
         with open(check_path, "w", encoding="utf-8") as target:
             target.write(content)
         proc = subprocess.Popen(
@@ -968,16 +1166,27 @@ def config_starts(path):
             stderr=subprocess.PIPE,
             text=True,
         )
+        # 进程提前退出视为失败；api 端口能连上视为成功；
+        # 否则沿用"存活超过几秒就算能启动"的判断（配置里可能没有 api 段）
+        deadline = time.time() + wait_seconds
+        api_ready = False
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                return False, clean_output(stdout + stderr) or "mosdns 校验进程异常退出"
+            if port_open(api_port):
+                api_ready = True
+                break
+            time.sleep(0.2)
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            return False, clean_output(stdout + stderr) or "mosdns 校验进程异常退出"
+        proc.terminate()
         try:
-            stdout, stderr = proc.communicate(timeout=2)
-            return False, clean_output(stdout + stderr)
+            proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            return True, "配置可以启动"
+            proc.kill()
+        return True, "配置可以启动" + ("（API 端口已响应）" if api_ready else "")
     except Exception as exc:
         if proc:
             try:
@@ -988,6 +1197,56 @@ def config_starts(path):
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def upstream_value_error(value):
+    # 上游地址会被拼进 YAML 的双引号字符串和 # TAG 注释行，这三个字符会破坏结构
+    value = str(value or "")
+    if any(char in value for char in '"\\#'):
+        return '不能包含双引号、反斜杠或 #'
+    return None
+
+
+def quoted_replacer(value):
+    # 用函数而不是 f-string 模板做替换，值里的 \g<1>、\1 之类不会被当作反向引用
+    return lambda match: f'{match.group(1)}"{value}"{match.group(2)}'
+
+
+def write_config_text(new_text):
+    tmp_file = f"{CONFIG_FILE}.webtmp"
+    with open(tmp_file, "w", encoding="utf-8") as file:
+        file.write(new_text)
+    os.replace(tmp_file, CONFIG_FILE)
+
+
+def restore_rollbacks(rollbacks):
+    # rollbacks: [(备份路径或 None, 目标文件)]。None 表示写入前文件不存在，回滚即删除
+    restored = False
+    for backup_path, target in rollbacks or []:
+        try:
+            if backup_path and os.path.exists(backup_path):
+                shutil.copy2(backup_path, target)
+                restored = True
+            elif backup_path is None and os.path.exists(target):
+                os.remove(target)
+                restored = True
+        except OSError:
+            pass
+    return restored
+
+
+def restart_or_rollback(rollbacks, success_message, failure_prefix):
+    # 重启失败就把备份拷回去再重启一次，和 restore_backup 的处理方式一致
+    ok, message = restart_mosdns()
+    if ok:
+        return True, success_message
+    if not restore_rollbacks(rollbacks):
+        return False, f"{failure_prefix}，mosdns 重启失败，且没有可回滚的备份：\n{message}"
+    restart_ok, restart_message = restart_mosdns()
+    text = f"{failure_prefix}，但 mosdns 重启失败，已回滚到修改前的文件：\n{message}"
+    if not restart_ok:
+        text += "\n\n回滚后重启仍失败，请手动检查：\n" + restart_message
+    return False, text
 
 
 def restore_default_template():
@@ -1001,22 +1260,27 @@ def restore_default_template():
     local_dns = current.get("local_dns_raw") or normalize_upstream(current.get("local_dns", ""), default_scheme="udp")
     remote_dns = current.get("remote_dns_raw") or normalize_upstream(current.get("remote_dns", ""), default_port=53)
     ttl = current.get("ttl") or "86400"
+    if not re.fullmatch(r"\d{1,7}", ttl):
+        ttl = "86400"
 
-    content = re.sub(
-        r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_LOCAL\s*)$',
-        rf'\g<1>"{local_dns}"\g<2>',
-        content,
-        count=1,
-    )
-    content = re.sub(
-        r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_REMOTE\s*)$',
-        rf'\g<1>"{remote_dns}"\g<2>',
-        content,
-        count=1,
-    )
+    # 当前配置里解析出的上游如果含非法字符，就保留模板默认值而不是拼进去
+    if local_dns.strip() and not upstream_value_error(local_dns):
+        content = re.sub(
+            r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_LOCAL\s*)$',
+            quoted_replacer(local_dns.strip()),
+            content,
+            count=1,
+        )
+    if remote_dns.strip() and not upstream_value_error(remote_dns):
+        content = re.sub(
+            r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_REMOTE\s*)$',
+            quoted_replacer(remote_dns.strip()),
+            content,
+            count=1,
+        )
     content = re.sub(
         r"(?m)^(\s*lazy_cache_ttl:\s*)\d+\s*$",
-        rf"\g<1>{ttl}",
+        lambda match: match.group(1) + ttl,
         content,
         count=1,
     )
@@ -1032,12 +1296,13 @@ def restore_default_template():
             pass
         return False, "内置默认模板校验失败，未替换当前配置：\n" + message
 
-    backup_file(CONFIG_FILE)
+    backup = backup_file(CONFIG_FILE, "config")
     os.replace(tmp_file, CONFIG_FILE)
-    ok, message = restart_mosdns()
-    if not ok:
-        return False, "默认配置已写入，但 mosdns 重启失败：\n" + message
-    return True, "已恢复内置默认配置，并保留当前上游 DNS 与 TTL。"
+    return restart_or_rollback(
+        [(backup, CONFIG_FILE)],
+        "已恢复内置默认配置，并保留当前上游 DNS 与 TTL。",
+        "默认配置已写入",
+    )
 
 
 def mosdns_asset_name():
@@ -1070,18 +1335,57 @@ def clean_version(value):
     return "v" + match.group(1)
 
 
-def download_file(urls, target):
+def download_file(urls, target, max_bytes=DOWNLOAD_MAX_BYTES, time_budget=DOWNLOAD_TIME_BUDGET):
+    # 分块下载：超过大小上限或总耗时预算就中止，不让一个异常的源把磁盘或请求拖死
     last_error = ""
+    started = time.time()
     for url in urls:
+        remaining = time_budget - (time.time() - started)
+        if remaining <= 0:
+            last_error = "下载总耗时超过预算，已中止"
+            break
         try:
             req = urlrequest.Request(url, headers={"User-Agent": "mosdns-web-manager"})
-            with urlrequest.urlopen(req, timeout=90) as resp, open(target, "wb") as file:
-                shutil.copyfileobj(resp, file)
-            if os.path.getsize(target) > 0:
+            written = 0
+            with urlrequest.urlopen(req, timeout=min(90, max(5, remaining))) as resp, open(target, "wb") as file:
+                declared = resp.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > max_bytes:
+                    raise ValueError(f"文件过大（{int(declared)} 字节），超过 {max_bytes} 字节上限")
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise ValueError(f"文件超过 {max_bytes} 字节上限")
+                    if time.time() - started > time_budget:
+                        raise ValueError("下载总耗时超过预算，已中止")
+                    file.write(chunk)
+            if written > 0:
                 return True, url
+            last_error = "下载内容为空"
         except Exception as exc:
             last_error = str(exc)
+            try:
+                os.remove(target)
+            except OSError:
+                pass
     return False, last_error
+
+
+def verify_zip_file(path):
+    # IrineSistiana/mosdns 的 release 只提供各平台 zip，没有 checksum 文件，
+    # 这里只能做 zip 完整性校验（CRC），等价于 unzip -t
+    try:
+        with zipfile.ZipFile(path) as archive:
+            bad = archive.testzip()
+        if bad:
+            return False, f"zip 内文件校验失败：{bad}"
+        return True, ""
+    except zipfile.BadZipFile:
+        return False, "下载文件不是有效 zip"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def mosctl_repo_settings():
@@ -1127,13 +1431,19 @@ def github_contents_app_url(repo_url, branch):
 
 
 def parse_github_contents_text(text):
-    data = json.loads(text or "{}")
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return ""
     if not isinstance(data, dict):
         return ""
     if data.get("encoding") != "base64" or not data.get("content"):
         return ""
     payload = str(data.get("content") or "").replace("\n", "")
-    return base64.b64decode(payload).decode("utf-8", "replace")
+    try:
+        return base64.b64decode(payload, validate=False).decode("utf-8", "replace")
+    except (ValueError, TypeError):
+        return ""
 
 
 def cache_bust_url(url):
@@ -1165,11 +1475,9 @@ def parse_panel_version(text):
     return match.group(1).strip() if match else ""
 
 
-def remote_panel_version(settings=None):
-    settings = settings or mosctl_repo_settings()
+def fetch_remote_panel_version(settings):
     raw_url = github_raw_app_url(settings["repo_url"], settings["branch"])
     contents_url = github_contents_app_url(settings["repo_url"], settings["branch"])
-    raw_error = ""
     if not raw_url or not contents_url:
         return {
             "success": False,
@@ -1178,39 +1486,47 @@ def remote_panel_version(settings=None):
             "message": "仅支持 GitHub 仓库在线检测，请检查 MOSCTL_REPO_URL",
         }
     raw_url = cache_bust_url(raw_url)
-    ok, text, source = read_url_text([contents_url, f"https://gh-proxy.com/{raw_url}", raw_url], timeout=15)
-    if ok:
-        if source == contents_url:
-            text = parse_github_contents_text(text)
-        version = parse_panel_version(text)
-        if version:
-            return {"success": True, "latest_version": version, "source": source, "message": ""}
-        raw_error = "raw 文件没有版本号，已改用 zip 包检测。"
-    else:
-        raw_error = "raw 文件检测失败，已改用 zip 包检测：\n" + text
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        zip_ok, zip_source, _, zip_settings = download_mosctl_source(tmpdir)
-        if zip_ok and zip_settings.get("remote_version"):
-            return {
-                "success": True,
-                "latest_version": zip_settings["remote_version"],
-                "source": zip_source,
-                "message": raw_error,
-            }
-        if zip_ok:
-            return {
-                "success": False,
-                "latest_version": "",
-                "source": zip_source,
-                "message": "远端面板没有版本号，可能是旧版本，已禁止在线升级以避免降级。",
-            }
-    return {"success": False, "latest_version": "", "source": source, "message": "检测远端面板版本失败：\n" + raw_error}
+    # 顺序：GitHub API 直连 → raw 直连 → 代理 raw。都失败就报"未知"，
+    # 不再为了读一个版本号去下载整个仓库 zip
+    urls = [contents_url, raw_url] + github_url_candidates(raw_url)[1:]
+    ok, text, source = read_url_text(urls, timeout=15)
+    if not ok:
+        return {"success": False, "latest_version": "", "source": "", "message": "检测远端面板版本失败（未知）：\n" + text}
+    if source == contents_url:
+        text = parse_github_contents_text(text)
+    version = parse_panel_version(text)
+    if version:
+        return {"success": True, "latest_version": version, "source": source, "message": ""}
+    return {
+        "success": False,
+        "latest_version": "",
+        "source": source,
+        "message": "远端面板没有版本号，可能是旧版本，已禁止在线升级以避免降级。",
+    }
 
 
-def panel_upgrade_state():
+def remote_panel_version(settings=None, force=False):
+    # 结果在内存里缓存 1 小时：每次打开页面都会检测一次，不能每次都打 GitHub
+    settings = settings or mosctl_repo_settings()
+    key = f"{settings['repo_url']}@{settings['branch']}"
+    now = time.time()
+    with REMOTE_VERSION_LOCK:
+        cached = REMOTE_VERSION_CACHE
+        if (
+            not force
+            and cached["result"] is not None
+            and cached["key"] == key
+            and now - cached["at"] < REMOTE_VERSION_CACHE_TTL
+        ):
+            return dict(cached["result"], cached=True)
+        result = fetch_remote_panel_version(settings)
+        REMOTE_VERSION_CACHE.update({"key": key, "at": now, "result": result})
+        return dict(result, cached=False)
+
+
+def panel_upgrade_state(force=False):
     settings = mosctl_repo_settings()
-    remote = remote_panel_version(settings)
+    remote = remote_panel_version(settings, force=force)
     current_tuple = panel_version_tuple(PANEL_VERSION)
     latest_tuple = panel_version_tuple(remote.get("latest_version"))
     update_available = bool(remote.get("success") and current_tuple and latest_tuple and latest_tuple > current_tuple)
@@ -1222,6 +1538,7 @@ def panel_upgrade_state():
         "latest_version": remote.get("latest_version", ""),
         "update_available": update_available,
         "check_success": remote.get("success", False),
+        "cached": bool(remote.get("cached")),
         "source": remote.get("source", ""),
         "message": remote.get("message", ""),
     }
@@ -1235,10 +1552,13 @@ def download_mosctl_source(tmpdir):
     archive_url = cache_bust_url(archive_url)
 
     zip_path = os.path.join(tmpdir, "mosctl-panel.zip")
-    ok, source = download_file([f"https://gh-proxy.com/{archive_url}", archive_url], zip_path)
+    ok, source = download_file(github_url_candidates(archive_url), zip_path)
     if not ok:
         return False, "下载 Mosctl 面板失败：\n" + source, None, settings
 
+    zip_ok, zip_message = verify_zip_file(zip_path)
+    if not zip_ok:
+        return False, f"{zip_message}，已取消升级", None, settings
     try:
         with zipfile.ZipFile(zip_path) as archive:
             archive.extractall(tmpdir)
@@ -1412,14 +1732,11 @@ def upgrade_mosdns_core():
         return False, f"官方 latest release 未发现当前架构安装包：{asset}"
 
     direct_url = f"{MOSDNS_RELEASE_BASE}/{asset}"
-    urls = [
-        direct_url,
-        f"https://gh-proxy.com/{direct_url}",
-    ]
+    urls = github_url_candidates(direct_url)
 
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
-    backup_bin = f"{BACKUP_DIR}/mosdns-bin.{stamp}.bak"
+    backup_bin = f"{BACKUP_DIR}/{KERNEL_BACKUP_PREFIX}{stamp}"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         zip_path = os.path.join(tmpdir, asset)
@@ -1427,6 +1744,10 @@ def upgrade_mosdns_core():
         if not ok:
             return False, "下载 mosdns 内核失败：\n" + source
 
+        # 官方 release 没有 checksum 文件，只能做 zip 完整性校验
+        zip_ok, zip_message = verify_zip_file(zip_path)
+        if not zip_ok:
+            return False, f"{zip_message}，已取消升级"
         try:
             with zipfile.ZipFile(zip_path) as archive:
                 archive.extractall(tmpdir)
@@ -1481,7 +1802,7 @@ def safe_sync_config():
 
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
-    safe_backup = f"{BACKUP_DIR}/config.pre-web-sync.{stamp}.yaml"
+    safe_backup = f"{BACKUP_DIR}/{CONFIG_BACKUP_PREFIX}pre-web-sync.{stamp}.yaml"
     shutil.copy2(CONFIG_FILE, safe_backup)
     cleanup_old_backups()
 
@@ -1500,27 +1821,23 @@ def safe_sync_config():
     return False, message if restart_ok else message + "\n\n恢复后重启仍失败，请手动检查。"
 
 
-def backup_file(path):
+def backup_file(path, prefix):
+    # 返回备份文件路径，不存在原文件时返回 None（调用方据此决定如何回滚）
     if not os.path.exists(path):
-        return
+        return None
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    name = os.path.basename(path)
     stamp = time.strftime("%Y%m%d%H%M%S")
-    shutil.copy2(path, f"{BACKUP_DIR}/{name}.{stamp}.bak")
+    backup_path = f"{BACKUP_DIR}/{prefix}.{stamp}.bak"
+    shutil.copy2(path, backup_path)
     cleanup_old_backups()
+    return backup_path
 
 
-def backup_candidates():
-    paths = []
-    patterns = [
-        f"{BACKUP_DIR}/*.yaml",
-        f"{BACKUP_DIR}/*.bak",
-        f"{MOSDNS_DIR}/config.yaml.bak",
-        f"{MOSDNS_DIR}/config.yaml.bad-sync.*",
-    ]
-    for pattern in patterns:
-        paths.extend(glob.glob(pattern))
+def rule_backup_prefix(rule_id):
+    return f"{RULE_BACKUP_PREFIX}{rule_id}"
 
+
+def list_backup_files(paths):
     items = []
     seen = set()
     for path in paths:
@@ -1542,6 +1859,38 @@ def backup_candidates():
     return items
 
 
+def backup_candidates():
+    # 只列配置备份：backup/ 下以 config. 开头的文件，加上旧版放在 /etc/mosdns 根目录的几种
+    patterns = [
+        f"{BACKUP_DIR}/{CONFIG_BACKUP_PREFIX}*",
+        f"{MOSDNS_DIR}/config.yaml.bak",
+        f"{MOSDNS_DIR}/config.yaml.bak.*",
+        f"{MOSDNS_DIR}/config.yaml.bad-sync.*",
+    ]
+    paths = []
+    for pattern in patterns:
+        paths.extend(glob.glob(pattern))
+    return [
+        item
+        for item in list_backup_files(paths)
+        if item["id"].startswith(CONFIG_BACKUP_PREFIX)
+        and not item["id"].endswith((".webtmp", ".defaultcheck"))
+    ]
+
+
+def kernel_backup_candidates():
+    return list_backup_files(glob.glob(f"{BACKUP_DIR}/{KERNEL_BACKUP_PREFIX}*"))
+
+
+def rule_backup_candidates():
+    # 按规则 id 分组，返回 {prefix: [items...]}
+    groups = {}
+    for item in list_backup_files(glob.glob(f"{BACKUP_DIR}/{RULE_BACKUP_PREFIX}*")):
+        prefix = item["id"].rsplit(".", 2)[0]
+        groups.setdefault(prefix, []).append(item)
+    return groups
+
+
 def resolve_backup(backup_id):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", str(backup_id or "")):
         return None
@@ -1558,7 +1907,7 @@ def restore_backup(backup_id):
 
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
-    current_backup = f"{BACKUP_DIR}/config.before-restore.{stamp}.yaml"
+    current_backup = f"{BACKUP_DIR}/{CONFIG_BACKUP_PREFIX}before-restore.{stamp}.yaml"
     if os.path.exists(CONFIG_FILE):
         shutil.copy2(CONFIG_FILE, current_backup)
         cleanup_old_backups()
@@ -1625,7 +1974,7 @@ def write_sync_settings(data):
 def read_account_settings():
     env = read_env()
     return {
-        "username": os.environ.get("WEB_USER") or env.get("WEB_USER", "admin"),
+        "username": env.get("WEB_USER", "admin"),
     }
 
 
@@ -1644,8 +1993,13 @@ def write_account_settings(data):
         if len(password) < 6 or not is_safe_text(password, 200) or env_value_error(password):
             return False, "新密码至少 6 位，且" + (env_value_error(password) or "不能过长")
         updates["WEB_SECRET"] = password
+        # 改密码时轮换会话密钥，其他浏览器上已登录的会话全部失效；
+        # 当前请求的会话会在响应时用新密钥重新签名，所以本窗口不用重新登录
+        updates["WEB_SESSION_SECRET"] = secrets.token_urlsafe(48)
     write_env(updates)
-    os.environ.update(updates)
+    if "WEB_SESSION_SECRET" in updates:
+        app.secret_key = updates["WEB_SESSION_SECRET"]
+        return True, "面板登录信息已保存，其他设备上的登录状态已失效"
     return True, "面板登录信息已保存"
 
 
@@ -1875,11 +2229,12 @@ def write_backup_settings(data):
 
 
 def cleanup_old_backups(keep_count=None):
+    # 配置备份按 keep_count 保留；内核备份固定保留 KERNEL_BACKUP_KEEP_COUNT 个；
+    # 规则备份每个规则各自保留 keep_count 个，三者互不占用名额
     keep_count = backup_keep_count() if keep_count is None else int(keep_count)
-    items = backup_candidates()
-    config_items = [item for item in items if not item["id"].startswith("mosdns-bin.")]
-    kernel_items = [item for item in items if item["id"].startswith("mosdns-bin.")]
-    stale_items = config_items[keep_count:] + kernel_items[KERNEL_BACKUP_KEEP_COUNT:]
+    stale_items = backup_candidates()[keep_count:] + kernel_backup_candidates()[KERNEL_BACKUP_KEEP_COUNT:]
+    for items in rule_backup_candidates().values():
+        stale_items.extend(items[keep_count:])
     deleted = []
     for item in stale_items:
         try:
@@ -1896,18 +2251,21 @@ def cleanup_old_backups(keep_count=None):
 
 
 def save_rule_content(rule_id, content):
+    # 返回 (ok, message, (备份路径, 规则路径))，第三项给 restart_or_rollback 用
     meta = RULE_FILES.get(rule_id)
     if not meta:
-        return False, "未知规则文件"
+        return False, "未知规则文件", None
     if not is_safe_text(content):
-        return False, "规则内容不合法或过大"
+        return False, "规则内容不合法或过大", None
 
     path = meta["path"]
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    backup_file(path)
-    with open(path, "w", encoding="utf-8") as file:
+    backup = backup_file(path, rule_backup_prefix(rule_id))
+    tmp_file = f"{path}.webtmp"
+    with open(tmp_file, "w", encoding="utf-8") as file:
         file.write(content)
-    return True, "规则已保存"
+    os.replace(tmp_file, path)
+    return True, "规则已保存", (backup, path)
 
 
 def broadcast_rule(rule_id, content):
@@ -1952,19 +2310,20 @@ def apply_synced_rules(rules):
     if not isinstance(rules, dict):
         return False, "同步内容不合法"
     applied = []
+    rollbacks = []
     for rule_id, content in rules.items():
         if rule_id not in SYNCABLE_RULE_IDS:
             continue
-        ok, message = save_rule_content(rule_id, content)
+        ok, message, rollback = save_rule_content(rule_id, content)
         if not ok:
+            # 之前已写入的规则先还原，不留下半套同步结果
+            restore_rollbacks(rollbacks)
             return False, message
+        rollbacks.append(rollback)
         applied.append(rule_id)
     if not applied:
         return False, "没有可同步的规则"
-    ok, message = restart_mosdns()
-    if not ok:
-        return False, "规则已写入，但 mosdns 重启失败：\n" + message
-    return True, "已同步规则：" + ", ".join(applied)
+    return restart_or_rollback(rollbacks, "已同步规则：" + ", ".join(applied), "规则已写入")
 
 
 def update_config_values(local_dns, remote_dns, ttl):
@@ -1975,25 +2334,27 @@ def update_config_values(local_dns, remote_dns, ttl):
     for label, value in (("国内 DNS", local_dns), ("国外 DNS", remote_dns)):
         if not is_safe_text(value, 200) or "\n" in value or "\r" in value or not value.strip():
             return False, f"{label} 不合法"
+        if upstream_value_error(value):
+            return False, f"{label} {upstream_value_error(value)}"
     local_dns = normalize_upstream(local_dns, default_scheme="udp")
     remote_dns = normalize_upstream(remote_dns, default_port=53)
 
     text = read_config_text()
     new_text, ttl_count = re.subn(
         r"(?m)^(\s*lazy_cache_ttl:\s*)\d+\s*$",
-        rf"\g<1>{ttl}",
+        lambda match: match.group(1) + str(ttl),
         text,
         count=1,
     )
     new_text, local_count = re.subn(
         r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_LOCAL\s*)$',
-        rf'\g<1>"{local_dns.strip()}"\g<2>',
+        quoted_replacer(local_dns.strip()),
         new_text,
         count=1,
     )
     new_text, remote_count = re.subn(
         r'(?m)^(\s*-\s*addr:\s*)["\']?[^"\'#\n]+["\']?(\s*#\s*TAG_REMOTE\s*)$',
-        rf'\g<1>"{remote_dns.strip()}"\g<2>',
+        quoted_replacer(remote_dns.strip()),
         new_text,
         count=1,
     )
@@ -2003,15 +2364,9 @@ def update_config_values(local_dns, remote_dns, ttl):
     if new_text == text:
         return True, "配置无变化"
 
-    backup_file(CONFIG_FILE)
-    tmp_file = f"{CONFIG_FILE}.webtmp"
-    with open(tmp_file, "w", encoding="utf-8") as file:
-        file.write(new_text)
-    os.replace(tmp_file, CONFIG_FILE)
-    ok, message = restart_mosdns()
-    if not ok:
-        return False, "配置已保存，但 mosdns 重启失败：\n" + message
-    return True, "配置已保存并重启 mosdns"
+    backup = backup_file(CONFIG_FILE, "config")
+    write_config_text(new_text)
+    return restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
 
 
 def rescue_enabled():
@@ -2056,16 +2411,16 @@ def get_version():
 
 
 def latest_mosdns_release():
-    urls = [
-        f"https://gh-proxy.com/{MOSDNS_RELEASE_API}",
-        MOSDNS_RELEASE_API,
-    ]
+    # 先直连 GitHub API，失败再走 .env 里配置的代理
+    urls = github_url_candidates(MOSDNS_RELEASE_API)
     last_error = ""
     for url in urls:
         try:
             req = urlrequest.Request(url, headers={"User-Agent": "mosdns-web-manager"})
             with urlrequest.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                data = json.loads(resp.read(DOWNLOAD_MAX_BYTES).decode("utf-8", "replace"))
+            if not isinstance(data, dict):
+                raise ValueError("release 接口返回了非对象数据")
             tag = data.get("tag_name") or data.get("name") or ""
             assets = data.get("assets") or []
             asset_names = [asset.get("name", "") for asset in assets if isinstance(asset, dict)]
@@ -2155,22 +2510,31 @@ def service_health_summary(running, enabled, rescue, values):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        address = client_address()
+        locked = login_locked_seconds(address)
+        if locked:
+            return render_template("login.html", error=f"失败次数过多，请 {locked} 秒后再试"), 429
         env = read_env()
         username = request.form.get("username", "")
         password = request.form.get("password", "")
-        valid_user = os.environ.get("WEB_USER") or env.get("WEB_USER", "admin")
-        valid_pass = os.environ.get("WEB_SECRET") or env.get("WEB_SECRET", "")
-        if username == valid_user and password == valid_pass:
+        valid_user = env.get("WEB_USER", "admin")
+        valid_pass = env.get("WEB_SECRET", "")
+        user_ok = secrets.compare_digest(username.encode("utf-8"), valid_user.encode("utf-8"))
+        pass_ok = bool(valid_pass) and secrets.compare_digest(password.encode("utf-8"), valid_pass.encode("utf-8"))
+        if user_ok and pass_ok:
+            clear_login_failures(address)
+            session.clear()
             session["logged_in"] = True
             session.permanent = True
             return redirect("/")
-        return render_template("login.html", error="用户名或密码错误")
+        record_login_failure(address)
+        return render_template("login.html", error="用户名或密码错误"), 401
     if session.get("logged_in"):
         return redirect("/")
     return render_template("login.html")
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
     session.clear()
     return redirect("/login")
@@ -2220,15 +2584,16 @@ def api_devices():
 def api_mihomo_settings():
     if request.method == "GET":
         return jsonify(read_mihomo_settings())
-    ok, message = write_mihomo_settings(request.json or {})
+    ok, message = write_mihomo_settings(json_body())
     return jsonify({"success": ok, "message": message, **read_mihomo_settings()})
 
 
 @app.route("/api/mihomo-test", methods=["POST"])
 @login_required
 def api_mihomo_test():
-    if request.json:
-        ok, message = write_mihomo_settings(request.json or {})
+    data = json_body()
+    if data:
+        ok, message = write_mihomo_settings(data)
         if not ok:
             return jsonify({"success": False, "message": message, **read_mihomo_settings()})
     ok, data = mihomo_api_get("/connections", timeout=3)
@@ -2257,7 +2622,7 @@ def api_mihomo_debug():
 @app.route("/api/devices/<path:device_ip>/note", methods=["POST"])
 @login_required
 def api_device_note(device_ip):
-    ok, message = write_device_note(device_ip, (request.json or {}).get("note", ""))
+    ok, message = write_device_note(device_ip, json_body().get("note", ""))
     return jsonify({"success": ok, "message": message})
 
 
@@ -2270,13 +2635,15 @@ def api_core_version():
 @app.route("/api/panel-upgrade-source")
 @login_required
 def api_panel_upgrade_source():
-    return jsonify(panel_upgrade_state())
+    # 页面加载时走缓存；"检测/重新检测"按钮带 refresh=1 强制重新请求 GitHub
+    return jsonify(panel_upgrade_state(force=is_true(request.args.get("refresh"))))
 
 
 @app.route("/api/control", methods=["POST"])
 @login_required
+@operation_locked
 def api_control():
-    action = (request.json or {}).get("action")
+    action = json_body().get("action")
     commands = {
         "start": (["systemctl", "start", "mosdns"], 30),
         "stop": (["systemctl", "stop", "mosdns"], 30),
@@ -2304,11 +2671,12 @@ def api_control():
 
 @app.route("/api/settings", methods=["GET", "POST"])
 @login_required
+@operation_locked
 def api_settings():
     if request.method == "GET":
         return jsonify(parse_config_values())
 
-    data = request.json or {}
+    data = json_body()
     ok, message = update_config_values(
         data.get("local_dns", ""),
         data.get("remote_dns", ""),
@@ -2322,42 +2690,36 @@ def api_settings():
 def api_account_settings():
     if request.method == "GET":
         return jsonify(read_account_settings())
-    ok, message = write_account_settings(request.json or {})
+    ok, message = write_account_settings(json_body())
     return jsonify({"success": ok, "message": message, **read_account_settings()})
 
 
 @app.route("/api/config", methods=["GET", "POST"])
 @login_required
+@operation_locked
 def api_config():
     if request.method == "GET":
         return jsonify({"content": read_config_text()})
 
-    data = request.json or {}
+    data = json_body()
     content = data.get("content", "")
     if not is_safe_text(content, 200000):
         return jsonify({"success": False, "message": "配置内容不合法或过大"})
 
-    backup_file(CONFIG_FILE)
-    tmp_file = f"{CONFIG_FILE}.webtmp"
-    with open(tmp_file, "w", encoding="utf-8") as file:
-        file.write(content)
-    os.replace(tmp_file, CONFIG_FILE)
-    ok, message = restart_mosdns()
-    return jsonify(
-        {
-            "success": ok,
-            "message": "配置已保存并重启 mosdns" if ok else "配置已保存，但 mosdns 重启失败：\n" + message,
-        }
-    )
+    backup = backup_file(CONFIG_FILE, "config")
+    write_config_text(content)
+    ok, message = restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
+    return jsonify({"success": ok, "message": message})
 
 
 @app.route("/api/backups", methods=["GET", "POST"])
 @login_required
+@operation_locked
 def api_backups():
     if request.method == "GET":
         return jsonify({"backups": [{k: v for k, v in item.items() if k != "path"} for item in backup_candidates()]})
 
-    backup_id = (request.json or {}).get("id")
+    backup_id = json_body().get("id")
     ok, message = restore_backup(backup_id)
     return jsonify({"success": ok, "message": message})
 
@@ -2367,12 +2729,13 @@ def api_backups():
 def api_backup_settings():
     if request.method == "GET":
         return jsonify(read_backup_settings())
-    ok, message = write_backup_settings(request.json or {})
+    ok, message = write_backup_settings(json_body())
     return jsonify({"success": ok, "message": message, **read_backup_settings()})
 
 
 @app.route("/api/backups/cleanup", methods=["POST"])
 @login_required
+@operation_locked
 def api_backups_cleanup():
     result = cleanup_old_backups()
     message = f"已清理 {result['deleted_count']} 个旧备份，当前剩余 {result['remaining_count']} 个"
@@ -2384,14 +2747,14 @@ def api_backups_cleanup():
 def api_rule_sync_settings():
     if request.method == "GET":
         return jsonify(read_sync_settings())
-    ok, message = write_sync_settings(request.json or {})
+    ok, message = write_sync_settings(json_body())
     return jsonify({"success": ok, "message": message, **read_sync_settings()})
 
 
 @app.route("/api/rule-sync-test", methods=["POST"])
 @login_required
 def api_rule_sync_test():
-    ok, message, results = test_sync_peers(request.json or {})
+    ok, message, results = test_sync_peers(json_body())
     return jsonify({"success": ok, "message": message, "results": results})
 
 
@@ -2400,26 +2763,42 @@ def api_rule_sync_test():
 def api_geo_schedule():
     if request.method == "GET":
         return jsonify(read_geo_schedule())
-    ok, message = write_geo_schedule(request.json or {})
+    ok, message = write_geo_schedule(json_body())
     return jsonify({"success": ok, "message": message, **read_geo_schedule()})
 
 
+def sync_token_matches(provided, expected):
+    if not expected or not isinstance(provided, str):
+        return False
+    return secrets.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
 @app.route("/api/rule-sync", methods=["POST"])
+@operation_locked
 def api_rule_sync():
     env = read_env()
     expected = env.get("RULE_SYNC_TOKEN", "")
+    # 优先用请求头里的密钥，这样密钥错误时根本不用解析请求体
     provided = request.headers.get("X-Mosdns-Sync-Token", "")
-    data = request.json or {}
+    data = None
     if not provided:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象"}), 400
         provided = str(data.get("token") or "")
-    if not expected or not secrets.compare_digest(provided, expected):
+    if not sync_token_matches(provided, expected):
         return jsonify({"success": False, "message": "同步密钥错误"}), 403
+    if data is None:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象"}), 400
     ok, message = apply_synced_rules(data.get("rules"))
     return jsonify({"success": ok, "message": message})
 
 
 @app.route("/api/rules/<rule_id>", methods=["GET", "POST"])
 @login_required
+@operation_locked
 def api_rules(rule_id):
     meta = RULE_FILES.get(rule_id)
     if not meta:
@@ -2442,21 +2821,16 @@ def api_rules(rule_id):
             }
         )
 
-    content = (request.json or {}).get("content", "")
-    saved, save_message = save_rule_content(rule_id, content)
+    content = json_body().get("content", "")
+    saved, save_message, rollback = save_rule_content(rule_id, content)
     if not saved:
         return jsonify({"success": False, "message": save_message})
-    ok, message = restart_mosdns()
+    ok, message = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
     if ok and rule_id in SYNCABLE_RULE_IDS:
         sync_message = broadcast_rule(rule_id, content)
         if sync_message:
             message = "规则已保存并重启 mosdns\n\n" + sync_message
-    return jsonify(
-        {
-            "success": ok,
-            "message": message if ok else "规则已保存，但 mosdns 重启失败：\n" + message,
-        }
-    )
+    return jsonify({"success": ok, "message": message})
 
 
 @app.route("/api/logs")

@@ -150,9 +150,13 @@ copy_payload() {
   cp -a "$payload/etc/mosdns/templates/." "$INSTALL_DIR/templates/"
   if [ -f "$payload/etc/mosdns/templates/default.yaml" ]; then
     if [ -f "$INSTALL_DIR/config.yaml" ]; then
-      cp -a "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml.bak.$(date +%Y%m%d%H%M%S)"
+      # 重装不覆盖已有配置；留一份快照到面板的备份目录（config.<stamp>.bak 会被面板列出并按保留数清理）
+      mkdir -p "$INSTALL_DIR/backup"
+      cp -a "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/backup/config.$(date +%Y%m%d%H%M%S).bak"
+      yellow "已存在 $INSTALL_DIR/config.yaml，保留不覆盖；如需内置模板可在面板「高级配置」里点击「恢复默认」。"
+    else
+      cp "$payload/etc/mosdns/templates/default.yaml" "$INSTALL_DIR/config.yaml"
     fi
-    cp "$payload/etc/mosdns/templates/default.yaml" "$INSTALL_DIR/config.yaml"
   fi
 
   if [ -d "$payload/etc/mosdns/rules" ]; then
@@ -187,6 +191,11 @@ write_env_file() {
 
   if [ -f "$INSTALL_DIR/.env" ] && [ "${MOSCTL_KEEP_ENV:-1}" = "1" ]; then
     yellow "保留已有 $INSTALL_DIR/.env"
+    # 旧版 .env 没有 GH_PROXY：补上默认值，面板和 mosctl 的下载回退都从这里读代理前缀
+    if ! grep -q '^GH_PROXY=' "$INSTALL_DIR/.env"; then
+      [ -z "$(tail -c1 "$INSTALL_DIR/.env")" ] || printf '\n' >> "$INSTALL_DIR/.env"
+      printf 'GH_PROXY="%s"\n' "$GH_PROXY" >> "$INSTALL_DIR/.env"
+    fi
     return
   fi
 
@@ -197,6 +206,7 @@ WEB_SECRET="$pass"
 WEB_PORT="$WEB_PORT"
 MOSCTL_REPO_URL="$REPO_URL"
 MOSCTL_BRANCH="$BRANCH"
+GH_PROXY="$GH_PROXY"
 RULE_SYNC_TOKEN="$sync_token"
 RULE_SYNC_ENABLED="false"
 RULE_SYNC_PEERS=""
@@ -215,12 +225,20 @@ enable_services() {
   systemctl restart mosdns-web
 }
 
+env_value() {
+  # set -Eeuo pipefail 下 grep 找不到会让整个管道失败，这里显式吞掉，缺键时返回空
+  grep "^$1=" "$INSTALL_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"' || true
+}
+
 print_summary() {
   local ip user pass
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  # 有些系统没有 hostname -I（或 hostname 不支持 -I），安装已经成功，这里不能因此退出
+  ip="$( (hostname -I 2>/dev/null || true) | awk '{print $1}')"
   [ -n "$ip" ] || ip="服务器IP"
-  user="$(grep '^WEB_USER=' "$INSTALL_DIR/.env" | cut -d= -f2- | tr -d '"')"
-  pass="$(grep '^WEB_SECRET=' "$INSTALL_DIR/.env" | cut -d= -f2- | tr -d '"')"
+  user="$(env_value WEB_USER)"
+  pass="$(env_value WEB_SECRET)"
+  [ -n "$user" ] || user="admin"
+  [ -n "$pass" ] || pass="(已有 .env 中的密码未改动)"
   green "$PROJECT_NAME 安装完成"
   printf '\n'
   printf 'Web 面板: http://%s:%s/\n' "$ip" "$WEB_PORT"

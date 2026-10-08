@@ -103,27 +103,38 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("api('/api/logs?lines=' + encodeURIComponent(lines), {silent: true})", text)
         self.assertNotIn("Failed to fetch", text)
 
-    def test_panel_upgrade_checks_proxy_source_before_github_direct(self):
+    def test_panel_upgrade_checks_github_direct_before_proxy(self):
         text = app_source()
 
         self.assertIn("def cache_bust_url", text)
         self.assertIn("def github_contents_app_url", text)
         self.assertIn("contents_url = github_contents_app_url", text)
         self.assertIn("parse_github_contents_text", text)
-        self.assertIn("contents_url, f\"https://gh-proxy.com/{raw_url}\", raw_url", text)
         self.assertIn("raw_url = cache_bust_url(raw_url)", text)
         self.assertIn("archive_url = cache_bust_url(archive_url)", text)
-        self.assertIn('f"https://gh-proxy.com/{raw_url}"', text)
-        self.assertIn("raw_url", text)
-        self.assertIn('download_file([f"https://gh-proxy.com/{archive_url}", archive_url]', text)
-        self.assertNotIn('read_url_text([raw_url, f"https://gh-proxy.com/{raw_url}"]', text)
-        self.assertNotIn('download_file([archive_url, f"https://gh-proxy.com/{archive_url}"]', text)
+        # 直连优先，代理只作回退，且代理前缀来自 .env 的 GH_PROXY
+        self.assertIn("def gh_proxy_prefix", text)
+        self.assertIn("def github_url_candidates", text)
+        self.assertIn("urls = [contents_url, raw_url] + github_url_candidates(raw_url)[1:]", text)
+        self.assertIn("download_file(github_url_candidates(archive_url), zip_path)", text)
+        self.assertNotIn('f"https://gh-proxy.com/{raw_url}"', text)
+        self.assertNotIn('f"https://gh-proxy.com/{archive_url}"', text)
+        # 版本检测不再为了读版本号去下载整个仓库 zip，且结果有缓存
+        self.assertNotIn("已改用 zip 包检测", text)
+        self.assertIn("REMOTE_VERSION_CACHE_TTL = 3600", text)
+        self.assertIn("def fetch_remote_panel_version", text)
+        self.assertIn("with REMOTE_VERSION_LOCK:", text)
 
-    def test_core_version_check_uses_proxy_source_before_github_api(self):
+    def test_core_version_check_uses_github_api_direct_before_proxy(self):
         text = app_source()
 
-        self.assertIn('f"https://gh-proxy.com/{MOSDNS_RELEASE_API}",\n        MOSDNS_RELEASE_API,', text)
-        self.assertNotIn('MOSDNS_RELEASE_API,\n        f"https://gh-proxy.com/{MOSDNS_RELEASE_API}",', text)
+        self.assertIn("urls = github_url_candidates(MOSDNS_RELEASE_API)", text)
+        self.assertNotIn('f"https://gh-proxy.com/{MOSDNS_RELEASE_API}"', text)
+        # 官方 release 没有 checksum，下载后做 zip 完整性校验
+        self.assertIn("def verify_zip_file", text)
+        self.assertIn("archive.testzip()", text)
+        self.assertIn("DOWNLOAD_MAX_BYTES", text)
+        self.assertIn("DOWNLOAD_TIME_BUDGET", text)
 
     def test_sidebar_version_label_does_not_repeat_product_name(self):
         text = index_source()

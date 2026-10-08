@@ -903,7 +903,7 @@
 
       <div class="sidebar-foot">
         <div class="shell-note">控制台会自动刷新服务状态。危险操作都需要二次确认。</div>
-        <a class="link-btn" href="/logout">退出登录</a>
+        <form method="post" action="/logout" style="display:inline"><button type="submit" class="link-btn">退出登录</button></form>
       </div>
     </aside>
 
@@ -1256,7 +1256,7 @@
                   <div class="hint">仓库：<span id="panelRepo">--</span><br>分支：<span id="panelBranch">--</span></div>
                 </div>
                 <div class="actions">
-                  <button type="button" onclick="loadPanelUpgradeSource()">检测</button>
+                  <button type="button" onclick="loadPanelUpgradeSource(true)">检测</button>
                   <button type="button" class="soft-danger" onclick="confirmUpgradePanel()">升级</button>
                 </div>
               </div>
@@ -1404,13 +1404,25 @@
     }
 
     async function api(url, options = {}) {
+      // 所有请求都带 X-Requested-With，后端靠它拒绝跨站表单提交
+      const headers = Object.assign({'X-Requested-With': 'XMLHttpRequest'}, options.headers || {});
       try {
-        const res = await fetch(url, options);
+        const res = await fetch(url, Object.assign({}, options, {headers}));
         if (res.status === 401) {
           location.href = '/login';
           return {};
         }
-        return await res.json();
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (parseError) {
+          data = {};
+        }
+        if (!res.ok) {
+          const message = (data && data.message) || ('请求失败（HTTP ' + res.status + '）');
+          throw new Error(message);
+        }
+        return data || {};
       } catch (error) {
         if (options?.silent) {
           console.debug('Silent API request failed', url, error);
@@ -1419,6 +1431,12 @@
         throw new Error(formatNetworkError(error));
       }
     }
+
+    // 按钮 onclick 直接调用 async 函数，api() 抛错时这里兜底弹 toast，不再是控制台里的未处理 rejection
+    window.addEventListener('unhandledrejection', event => {
+      event.preventDefault();
+      toast('请求失败', formatNetworkError(event.reason));
+    });
 
     function setBusy(value, message) {
       busy = value;
@@ -1578,8 +1596,9 @@
       control('upgrade_core');
     }
 
-    async function loadPanelUpgradeSource() {
-      const res = await api('/api/panel-upgrade-source');
+    async function loadPanelUpgradeSource(refresh = false) {
+      // 页面加载走后端 1 小时缓存；手动"检测"才强制刷新
+      const res = await api('/api/panel-upgrade-source' + (refresh ? '?refresh=true' : ''));
       $('panelRepo').textContent = res.repo_url || '--';
       $('panelBranch').textContent = res.branch || '--';
       panelRepoUrl = res.repo_url || panelRepoUrl;
@@ -1635,7 +1654,7 @@
     }
 
     async function refreshPanelVersionPopover() {
-      const res = await loadPanelUpgradeSource();
+      const res = await loadPanelUpgradeSource(true);
       renderVersionPopover(res);
     }
 

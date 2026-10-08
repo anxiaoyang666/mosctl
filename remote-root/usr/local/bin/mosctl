@@ -1,21 +1,30 @@
 #!/bin/bash
-# MosDNS 管理工具 v0.3.9
+# MosDNS 管理工具（版本号以 /etc/mosdns/manager/app.py 里的 PANEL_VERSION 为准）
 RESCUE_DNS="223.5.5.5"
 ENV_FILE="/etc/mosdns/.env"
+MANAGER_APP="/etc/mosdns/manager/app.py"
 # 只读取需要的键，不 source 整个文件：.env 的值来自 Web 面板，不能当作 shell 代码执行
 env_get() {
     [ -f "$ENV_FILE" ] || return 0
     grep -E "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
 }
+env_has() {
+    [ -f "$ENV_FILE" ] && grep -qE "^$1=" "$ENV_FILE"
+}
 REPO_URL="$(env_get MOSCTL_REPO_URL)"
 REPO_BRANCH="$(env_get MOSCTL_BRANCH)"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-GH_PROXY="https://gh-proxy.com/"
+# 代理前缀只从 .env 读：没有这个键用默认值，键存在但为空表示不走代理
+if env_has GH_PROXY; then
+    GH_PROXY="$(env_get GH_PROXY)"
+else
+    GH_PROXY="https://gh-proxy.com/"
+fi
 CONFIG_FILE="/etc/mosdns/config.yaml"
 KERNEL_VERSION="v5.3.4"
-SCRIPT_VER="v0.3.9"
 LOG_FILE="/var/log/mosdns.log"
 CACHE_FILE="/etc/mosdns/cache.dump"
+IP_FORWARD_STATE="/etc/mosdns/.rescue-ip-forward"
 
 # 颜色
 RED='\033[0;31m'
@@ -23,6 +32,30 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 PLAIN='\033[0m'
 
+# 面板版本：面板升级会同时覆盖 app.py 和本脚本，直接从 app.py 读就不会不同步
+script_version() {
+    local version=""
+    if [ -f "$MANAGER_APP" ]; then
+        version="$(grep -E '^PANEL_VERSION *= *"' "$MANAGER_APP" | head -n 1 | cut -d'"' -f2)"
+    fi
+    [ -n "$version" ] && echo "v$version" || echo "unknown"
+}
+SCRIPT_VER="$(script_version)"
+
+# 转义 sed 替换串里的特殊字符（分隔符 | 以及 & 和反斜杠）
+sed_escape() {
+    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
+# 上游地址会被写进 YAML 的双引号字符串和 # TAG 注释行，这三个字符会破坏结构
+upstream_invalid() {
+    case "$1" in
+        *'"'*|*'\'*|*'#'*) return 0 ;;
+    esac
+    return 1
+}
+
+# 把直连地址转成代理地址；只处理 GitHub 域名，代理为空时原样返回
 geo_url() {
     local value="$1"
     if [ -n "$GH_PROXY" ]; then
@@ -34,12 +67,30 @@ geo_url() {
     echo "$value"
 }
 
+# 先直连，失败再走代理
+fetch_url() {
+    local output="$1"
+    local source="$2"
+    local proxied
+    if wget -q --show-progress -O "$output" "$source"; then
+        return 0
+    fi
+    proxied="$(geo_url "$source")"
+    [ "$proxied" != "$source" ] || return 1
+    echo -e "${YELLOW}   直连失败，改走代理重试...${PLAIN}"
+    wget -q --show-progress -O "$output" "$proxied"
+}
+
 rescue_enable() {
     if iptables -t nat -C PREROUTING -p udp --dport 53 -j DNAT --to-destination $RESCUE_DNS 2>/dev/null; then
         echo -e "${YELLOW}⚠️  救援模式已在运行中。${PLAIN}"
         return
     fi
     echo -e "${RED}🚑 正在启用救援模式 (转发 -> $RESCUE_DNS)...${PLAIN}"
+    # 记住开启前的 ip_forward 值，关闭救援模式时恢复；系统本来就在转发（比如同时跑 mihomo）时不会被误关
+    if [ ! -f "$IP_FORWARD_STATE" ]; then
+        sysctl -n net.ipv4.ip_forward 2>/dev/null > "$IP_FORWARD_STATE" || rm -f "$IP_FORWARD_STATE"
+    fi
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
     iptables -t nat -A PREROUTING -p udp --dport 53 -j DNAT --to-destination $RESCUE_DNS
     iptables -t nat -A PREROUTING -p tcp --dport 53 -j DNAT --to-destination $RESCUE_DNS
@@ -56,6 +107,14 @@ rescue_disable() {
     iptables -t nat -D PREROUTING -p tcp --dport 53 -j DNAT --to-destination $RESCUE_DNS 2>/dev/null || true
     iptables -t nat -D POSTROUTING -p udp -d $RESCUE_DNS --dport 53 -j MASQUERADE 2>/dev/null || true
     iptables -t nat -D POSTROUTING -p tcp -d $RESCUE_DNS --dport 53 -j MASQUERADE 2>/dev/null || true
+
+    # 恢复开启救援前的 ip_forward（通常是 0）；没有记录说明本次没开过，不动
+    if [ -f "$IP_FORWARD_STATE" ]; then
+        local previous
+        previous="$(tr -cd '01' < "$IP_FORWARD_STATE" | head -c 1)"
+        sysctl -w "net.ipv4.ip_forward=${previous:-0}" >/dev/null 2>&1 || true
+        rm -f "$IP_FORWARD_STATE"
+    fi
 
     # 打印切回的具体 DNS 信息
     if [ "$1" != "silent" ] && [ -f "$CONFIG_FILE" ]; then
@@ -96,14 +155,14 @@ sync_config() {
         cp "$TEMP_DIR/templates/config.yaml" /etc/mosdns/config.yaml
         rm -rf "$TEMP_DIR"
 
-        if [ -n "$old_ttl" ]; then
+        if [[ "$old_ttl" =~ ^[0-9]+$ ]]; then
             sed -i "s/lazy_cache_ttl: [0-9]*/lazy_cache_ttl: ${old_ttl}/" /etc/mosdns/config.yaml
         fi
-        if [ -n "$old_local_dns" ]; then
-            sed -i "s|\(.*\)- addr:.*# TAG_LOCAL|\1- addr: \"${old_local_dns}\" # TAG_LOCAL|" /etc/mosdns/config.yaml
+        if [ -n "$old_local_dns" ] && ! upstream_invalid "$old_local_dns"; then
+            sed -i "s|\(.*\)- addr:.*# TAG_LOCAL|\1- addr: \"$(sed_escape "$old_local_dns")\" # TAG_LOCAL|" /etc/mosdns/config.yaml
         fi
-        if [ -n "$old_remote_dns" ]; then
-            sed -i "s|\(.*\)- addr:.*# TAG_REMOTE|\1- addr: \"${old_remote_dns}\" # TAG_REMOTE|" /etc/mosdns/config.yaml
+        if [ -n "$old_remote_dns" ] && ! upstream_invalid "$old_remote_dns"; then
+            sed -i "s|\(.*\)- addr:.*# TAG_REMOTE|\1- addr: \"$(sed_escape "$old_remote_dns")\" # TAG_REMOTE|" /etc/mosdns/config.yaml
         fi
 
         if systemctl list-units --full -all | grep -q "mosdns.service"; then
@@ -136,8 +195,9 @@ change_upstream() {
     grep "$tag_marker" $CONFIG_FILE | grep -v "grep"
     if [ -t 0 ]; then read -p "地址: " new_ip; else echo -n "地址: "; read new_ip < /dev/tty; fi
     if [ -z "$new_ip" ]; then echo "已取消"; return; fi
+    if upstream_invalid "$new_ip"; then echo -e "${RED}❌ 地址不能包含双引号、反斜杠或 #${PLAIN}"; return 1; fi
     if [[ -n "$default_proto" ]] && [[ "$new_ip" != *"://"* ]]; then new_ip="${default_proto}://${new_ip}"; fi
-    sed -i "s|\(.*\)- addr:.*$tag_marker|\1- addr: \"$new_ip\" $tag_marker|" $CONFIG_FILE
+    sed -i "s|\(.*\)- addr:.*$tag_marker|\1- addr: \"$(sed_escape "$new_ip")\" $tag_marker|" $CONFIG_FILE
     systemctl restart mosdns && echo -e "${GREEN}✅ 修改成功！${PLAIN}"
 }
 
@@ -168,9 +228,9 @@ run_test() {
         if [ $exit_code -eq 0 ]; then
             local ip=$(echo "$result" | grep "Address:" | grep -v "#53" | grep -v "127.0.0.1" | grep -v "::1" | awk '{print $2}' | head -n 1)
             if [ -z "$ip" ]; then ip=$(echo "$result" | tail -n 2 | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1); fi
-            echo -e "${GREEN}✅ Pass (${duration}ms)${NC} -> IP: ${YELLOW}${ip}${NC}"
+            echo -e "${GREEN}✅ Pass (${duration}ms)${PLAIN} -> IP: ${YELLOW}${ip}${PLAIN}"
         else
-            echo -e "${RED}❌ Failed (Timeout)${NC}"
+            echo -e "${RED}❌ Failed (Timeout)${PLAIN}"
         fi
     }
     check_domain "www.baidu.com" "🇨🇳 国内"
@@ -296,7 +356,7 @@ update_geo_rules() {
         local tmp
         tmp=$(mktemp "${target}.tmp.XXXXXX")
         echo " - $(basename "$target")"
-        if wget -q --show-progress -O "$tmp" "$(geo_url "$source")"; then
+        if fetch_url "$tmp" "$source"; then
             mv "$tmp" "$target"
         else
             rm -f "$tmp"
@@ -342,8 +402,18 @@ uninstall_mosdns() {
         rm -f /var/log/mosdns.log
         
         crontab -l 2>/dev/null | grep -v "mosctl update" | crontab -
-        echo "nameserver 223.5.5.5" > /etc/resolv.conf
-        
+
+        # 只在 resolv.conf 是普通文件且指向本机时才改写；
+        # systemd-resolved / NetworkManager 管理的符号链接由它们自己维护，改了也会被覆盖
+        if [ -L /etc/resolv.conf ]; then
+            echo "ℹ️  /etc/resolv.conf 是符号链接（由 systemd-resolved/NetworkManager 等管理），未改动，请自行确认 DNS 设置。"
+        elif grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.1' /etc/resolv.conf 2>/dev/null; then
+            echo "nameserver 223.5.5.5" > /etc/resolv.conf
+            echo "ℹ️  /etc/resolv.conf 原指向 127.0.0.1，已改为 223.5.5.5。"
+        else
+            echo "ℹ️  /etc/resolv.conf 未指向本机，保持不变。"
+        fi
+
         rm -f /usr/local/bin/mosctl
         echo -e "${GREEN}✅ 卸载完成。系统已清理干净。\033[0m"
         exit 0
@@ -400,7 +470,7 @@ if [ $# -gt 0 ]; then
         flush) flush_cache ;;
         cache-ttl) change_cache_ttl "$2" ;;
         test) run_test ;;
-        version) echo "" ;;
+        version) echo "$SCRIPT_VER" ;;
         *) echo "Usage: mosctl [rescue|sync|update|flush|cache-ttl|test|version]" ;;
     esac
 else

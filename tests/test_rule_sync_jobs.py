@@ -200,6 +200,66 @@ class RuleSyncJobTest(unittest.TestCase):
         self.assertIsNone(result["sync_job"])
         self.assertEqual(app.api_rule_sync_job("latest"), {"success": True, "job": None})
 
+    def write_rule(self, rule_id, content):
+        path = Path(self.app.RULE_FILES[rule_id]["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def forbid_writes(self):
+        app = self.app
+        self.touched = []
+        app.save_rule_content = lambda *a: self.touched.append(("save", a)) or (True, "规则已保存", None)
+        app.rule_content_starts = lambda *a: self.touched.append(("sandbox", a)) or (True, "ok")
+        app.restart_or_rollback = lambda *a: self.touched.append(("restart", a)) or (True, a[1])
+        app.restart_mosdns = lambda: self.touched.append(("restart_mosdns",)) or (True, "")
+
+    def test_unchanged_rule_save_skips_restart_but_still_broadcasts(self):
+        app = self.app
+        path = self.write_rule("force-cn", "# 国内\nqq.com\nfull:A.qq.com\n")
+        mtime = path.stat().st_mtime_ns
+        self.forbid_writes()
+        app.request.get_json = lambda silent=True: {"content": "full:a.qq.com\n\nQQ.com # 注释\nqq.com\n"}
+        result = app.api_rules("force-cn")
+        self.assertTrue(result["success"])
+        self.assertTrue(result["message"].startswith("规则内容没有变化，未重启；正在后台同步到 2 个节点"), result["message"])
+        self.assertTrue(result["sync_job"])
+        self.assertEqual(self.touched, [])
+        self.assertEqual(path.stat().st_mtime_ns, mtime)
+        self.assertEqual(list(Path(self.tmp.name).rglob("*.bak")), [])
+        self.wait_finished(result["sync_job"])
+
+    def test_changed_rule_save_still_writes_and_restarts(self):
+        app = self.app
+        self.write_rule("force-cn", "qq.com\n")
+        self.forbid_writes()
+        app.request.get_json = lambda silent=True: {"content": "qq.com\nbaidu.com\n"}
+        result = app.api_rules("force-cn")
+        self.assertTrue(result["success"])
+        self.assertEqual([item[0] for item in self.touched], ["save", "restart"])
+        self.wait_finished(result["sync_job"])
+
+    def test_received_sync_with_same_content_is_a_no_op(self):
+        app = self.app
+        self.write_rule("force-cn", "qq.com\nbaidu.com\n")
+        self.write_rule("force-nocn", "github.com\n")
+        self.forbid_writes()
+        self.assertEqual(
+            app.apply_synced_rules({"force-cn": "baidu.com\nqq.com\n", "force-nocn": "# x\ngithub.com"}),
+            (True, "规则内容没有变化，未重启"),
+        )
+        self.assertEqual(self.touched, [])
+        # 只有一条变了：只写那一条，再重启
+        ok, message = app.apply_synced_rules({"force-cn": "qq.com\nbaidu.com\n", "force-nocn": "openai.com\n"})
+        self.assertTrue(ok)
+        self.assertEqual([item[0] for item in self.touched], ["save", "restart"])
+        self.assertEqual(self.touched[0][1][0], "force-nocn")
+        self.assertEqual(app.apply_synced_rules({}), (False, "没有可同步的规则"))
+
+    def test_missing_rule_file_counts_as_changed(self):
+        self.assertFalse(self.app.rule_content_unchanged("force-cn", ""))
+        self.assertFalse(self.app.rule_content_unchanged("hosts", "nas.lan 10.0.0.1"))
+
 
 class RuleSyncPollingContractTest(unittest.TestCase):
     def test_frontend_polls_job_and_swallows_errors(self):

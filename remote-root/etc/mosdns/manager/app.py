@@ -54,7 +54,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.36"
+PANEL_VERSION = "0.3.37"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -2078,6 +2078,34 @@ def rule_content_error(rule_id, content):
     return None
 
 
+RULES_UNCHANGED_MESSAGE = "规则内容没有变化，未重启"
+
+
+def rule_entry_set(content):
+    # 比较规则是否变化用：去掉注释/空行、去重、不计顺序；域名不分大小写，domain: 前缀等同于不写
+    entries = set()
+    for _number, body in rule_lines(content):
+        if body.lower().startswith("domain:"):
+            body = body[len("domain:"):]
+        if not body.lower().startswith("regexp:"):
+            body = body.lower()
+        entries.add(body)
+    return entries
+
+
+def rule_content_unchanged(rule_id, content):
+    """同步规则（强制国内/国外）的内容和当前文件等价时返回 True；文件不存在算有变化。"""
+    meta = RULE_FILES.get(rule_id)
+    if rule_id not in SYNCABLE_RULE_IDS or not meta or not is_safe_text(content):
+        return False
+    try:
+        with open(meta["path"], "r", encoding="utf-8") as file:
+            current = file.read()
+    except OSError:
+        return False
+    return rule_entry_set(current) == rule_entry_set(content)
+
+
 def save_rule_content(rule_id, content):
     # 返回 (ok, message, (备份路径, 规则路径))，第三项给 restart_or_rollback 用。
     # 先查格式、再用沙箱 mosdns 校验，都通过才写文件；线上服务在这之前不会被碰
@@ -2261,8 +2289,12 @@ def apply_synced_rules(rules):
         return False, "同步内容不合法"
     applied = []
     rollbacks = []
+    unchanged = []
     for rule_id, content in rules.items():
         if rule_id not in SYNCABLE_RULE_IDS:
+            continue
+        if rule_content_unchanged(rule_id, content):
+            unchanged.append(rule_id)
             continue
         ok, message, rollback = save_rule_content(rule_id, content)
         if not ok:
@@ -2272,6 +2304,8 @@ def apply_synced_rules(rules):
         rollbacks.append(rollback)
         applied.append(rule_id)
     if not applied:
+        if unchanged:
+            return True, RULES_UNCHANGED_MESSAGE
         return False, "没有可同步的规则"
     return restart_or_rollback(rollbacks, "已同步规则：" + ", ".join(applied), "规则已写入")
 
@@ -2810,18 +2844,22 @@ def api_rules(rule_id):
         )
 
     content = json_body().get("content", "")
-    saved, save_message, rollback = save_rule_content(rule_id, content)
-    if not saved:
-        return jsonify({"success": False, "message": save_message})
-    ok, message = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
+    if rule_content_unchanged(rule_id, content):
+        # 内容等价：不写文件、不备份、不跑沙箱、不重启；但仍推送给其他节点（它们可能还是旧的，已一致的会自己跳过）
+        ok, message = True, RULES_UNCHANGED_MESSAGE
+    else:
+        saved, save_message, rollback = save_rule_content(rule_id, content)
+        if not saved:
+            return jsonify({"success": False, "message": save_message})
+        ok, message = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
     sync_job = None
     if ok and rule_id in SYNCABLE_RULE_IDS:
         # 同步在后台线程里进行，不占用本请求的操作锁；前端拿 sync_job 轮询结果
         sync_job, sync_message = start_broadcast(rule_id, content)
         if sync_job:
-            message = "规则已保存并重启 mosdns；" + sync_message
+            message = message + "；" + sync_message
         elif sync_message:
-            message = "规则已保存并重启 mosdns\n\n" + sync_message
+            message = message + "\n\n" + sync_message
     return jsonify({"success": ok, "message": message, "sync_job": sync_job})
 
 

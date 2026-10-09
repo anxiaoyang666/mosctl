@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.44"
+PANEL_VERSION = "0.3.45"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -293,7 +293,6 @@ LIFECYCLE_LOG_MESSAGES = {
     "cache dumped", "starting shutdown sequences", "signal received", "read err",
 }
 LIFECYCLE_GROUP_SECONDS = 5
-LOG_GROUP_DETAIL_LINES = 40
 
 
 def log_entry_epoch(entry):
@@ -323,12 +322,18 @@ def summarize_lifecycle(group):
         summary = "mosdns 已停止"
     else:
         return None
-    details = [item.get("detail") or "" for item in group]
-    if len(details) > LOG_GROUP_DETAIL_LINES:
-        details = details[:LOG_GROUP_DETAIL_LINES] + [f"……共 {len(group)} 行"]
+    tags = []
+    for item in group:
+        if item.get("message") == "loading plugin":
+            match = re.search(r'"tag":\s*"([^"]+)"', item.get("detail") or "")
+            if match and match.group(1) not in tags:
+                tags.append(match.group(1))
+    detail = f"合并了 {len(group)} 行启停日志"
+    if tags:
+        detail += "；模块：" + "、".join(sorted(tags))
     return {
         "time": group[0].get("time", ""), "level": "INFO", "component": "", "summary": summary,
-        "detail": "\n".join(details), "raw": "\n".join(item.get("raw") or "" for item in group),
+        "detail": detail, "raw": "\n".join(item.get("raw") or "" for item in group),
         "kind": "info", "message": "lifecycle", "count": len(group),
     }
 

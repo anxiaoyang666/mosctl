@@ -69,6 +69,7 @@ class PanelReviewTest(unittest.TestCase):
         entries = self.app.parse_log_entries("\n".join(lines))
         self.assertEqual([e["summary"] for e in entries][1:], ["mosdns 已重启（重新加载 2 个模块）", "缓存已定期保存 2 次（最近一次 20 条记录）"])
         self.assertEqual(entries[0]["kind"], "error", "真正的错误单独保留")
+        self.assertEqual(entries[1]["detail"], "合并了 5 行启停日志；模块：cache、hosts")
 
     # --- 最近通知 ---
     def test_recent_notifications(self):

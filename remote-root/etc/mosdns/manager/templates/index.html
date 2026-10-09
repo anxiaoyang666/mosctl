@@ -1187,6 +1187,34 @@
               <pre class="example-box" id="autoUpdateLog"></pre>
             </details>
           </section>
+
+          <section class="panel" id="notifyCard">
+            <div class="panel-head">
+              <div>
+                <h3>通知</h3>
+                <div class="panel-note">自动更新结果、Geo 更新失败、同步规则未能应用、改动回滚时推送到 Webhook（与 mihomo 面板相同格式）。反复失败只在变化时通知，最多每 3 天提醒一次。</div>
+              </div>
+              <span class="pill" id="notifyStatus">--</span>
+            </div>
+            <label class="check-row"><input id="notifyEnabled" type="checkbox"> 启用通知</label>
+            <div class="field-grid">
+              <div class="field">
+                <div class="field-title">站点名称</div>
+                <input id="notifySiteName" maxlength="20" placeholder="mosdns" autocomplete="off">
+                <p class="hint" style="margin: 8px 0 0;">显示在标题里，例如“✅ 联通 · mosdns 内核已更新”；最多 20 个字符。</p>
+              </div>
+              <div class="field">
+                <div class="field-title">Webhook 地址</div>
+                <input id="notifyUrl" type="password" autocomplete="new-password" placeholder="https://...">
+                <p class="hint" id="notifyUrlHint" style="margin: 8px 0 0;">当前：未设置。留空保存会沿用已保存的地址。</p>
+              </div>
+            </div>
+            <div class="actions" style="margin-top: 10px;">
+              <button type="button" class="primary" onclick="saveNotifySettings()">保存设置</button>
+              <button type="button" onclick="sendTestNotification()">发送测试通知</button>
+            </div>
+            <div class="sync-test-message" id="notifyTestResult" style="white-space: pre-wrap;"></div>
+          </section>
         </div>
       </section>
 
@@ -1454,7 +1482,7 @@
       history.replaceState(null, '', '#' + name);
       if (name === 'overview') loadDashboardLogs();
       if (name === 'policy') { loadSettings(); loadRule(); }
-      if (name === 'operations') { loadBackups(); loadBackupSettings(); loadSyncSettings(); loadGeoSchedule(); loadAutoUpdate(); loadPanelUpgradeSource(); }
+      if (name === 'operations') { loadBackups(); loadBackupSettings(); loadSyncSettings(); loadGeoSchedule(); loadAutoUpdate(); loadNotifySettings(); loadPanelUpgradeSource(); }
       if (name === 'advanced') { loadAccountSettings(); loadConfig(); }
     }
 
@@ -2159,6 +2187,61 @@
           toast('自动更新结束', $('autoUpdateCoreResult').textContent + '\n\n' + $('autoUpdatePanelResult').textContent);
         }
       }, 3000);
+    }
+
+    function renderNotifySettings(res) {
+      $('notifyEnabled').checked = Boolean(res.enabled);
+      $('notifySiteName').value = res.site_name || '';
+      $('notifyUrl').value = '';
+      // 后端只返回主机名，完整地址（常带 key）不回传到浏览器
+      $('notifyUrlHint').textContent = '当前：' + (res.url_display || '未设置') + '。留空保存会沿用已保存的地址。';
+      $('notifyStatus').textContent = res.enabled ? '已启用' : '未启用';
+    }
+
+    async function loadNotifySettings() {
+      const res = await api('/api/notify-settings');
+      renderNotifySettings(res);
+      return res;
+    }
+
+    async function saveNotifySettings() {
+      if (busy) return;
+      setBusy(true, '正在保存通知设置...');
+      try {
+        const res = await api('/api/notify-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            enabled: $('notifyEnabled').checked,
+            site_name: $('notifySiteName').value.trim(),
+            url: $('notifyUrl').value.trim()
+          })
+        });
+        toast(res.success ? '保存完成' : '保存失败', res.message || '');
+        if (res.success) renderNotifySettings(res);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function sendTestNotification() {
+      if (busy) return;
+      setBusy(true, '正在发送测试通知...');
+      try {
+        const res = await api('/api/notify-test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            site_name: $('notifySiteName').value.trim(),
+            url: $('notifyUrl').value.trim()
+          })
+        });
+        const text = (res.host ? res.host + '：' : '') + (res.message || '');
+        $('notifyTestResult').textContent = text;
+        toast(res.success ? '测试通知已发送' : '测试通知失败', text);
+      } finally {
+        setBusy(false);
+      }
     }
 
     async function loadConfig() {

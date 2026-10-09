@@ -251,6 +251,42 @@ class CoreInstallTest(Base):
         self.assertTrue(ok, message)
         self.assertIn("/releases/latest/download/", self.downloads[0][0])
 
+    def test_notification_summaries(self):
+        # 成功：健康检查通过一行
+        self.app.dns_query = lambda name, server=None, timeout=2.0: (True, name)
+        outcome = self.app.install_mosdns_core(release=self.release)
+        self.assertEqual(outcome["summary"], ["健康检查通过：服务、国内解析、国外解析"])
+
+    def test_rollback_summary_names_failed_check(self):
+        write_fake_mosdns(self.bin, "v5.3.3")
+        calls = {"google": 0}
+
+        def fake_dns(name, server=None, timeout=2.0):
+            if name == "www.google.com":
+                calls["google"] += 1
+                return calls["google"] > 1, name  # 新内核失败，回滚后复查通过
+            return True, name
+
+        self.app.dns_query = fake_dns
+        outcome = self.app.install_mosdns_core(release=self.release)
+        self.assertEqual(outcome["result"], "rolled_back")
+        self.assertEqual(outcome["summary"], ["健康检查未通过：国外解析", "已恢复旧版本"])
+
+    def test_sandbox_failure_summary(self):
+        self.app.config_starts = lambda path, wait_seconds=3.0, binary=None: (False, "plugin forward: bad")
+        outcome = self.app.install_mosdns_core(release=self.release)
+        self.assertEqual(outcome["summary"], ["新内核无法用当前配置启动", "现有内核未改动"])
+
+    def test_health_failure_summary_labels(self):
+        summary = self.app.health_failure_summary
+        self.assertEqual(summary("健康检查失败：\nmosdns 服务不是 active"), "健康检查未通过：服务")
+        self.assertEqual(
+            summary("x\nDNS 查询失败：www.baidu.com：超时\nDNS 查询失败：www.google.com：超时"),
+            "健康检查未通过：国内解析、国外解析",
+        )
+        self.assertEqual(summary("mosdns version 报告 v5.3.3，预期 v5.3.4"), "健康检查未通过：版本")
+        self.assertEqual(summary("Job for mosdns.service failed"), "新内核启动失败")
+
 
 class DnsQueryTest(Base):
     def test_real_udp_query_against_local_responder(self):
@@ -522,6 +558,19 @@ class PanelPlanTest(Base):
         self.assertTrue(self.app.finish_panel_auto_update())
         self.assertEqual(self.app.read_auto_update_state()["panel"]["last_result"], "failed")
 
+    def test_startup_notifies_panel_result(self):
+        sent = []
+        self.app.notify_event = lambda level, subject, lines=None, background=False, env=None: sent.append((level, subject, lines))
+        self.app.update_auto_update_item("panel", last_result="started", to="v0.3.40", **{"from": "v0.3.38"})
+        self.app.PANEL_VERSION = "0.3.40"
+        self.app.finish_panel_auto_update()
+        self.assertEqual(sent, [("success", "管理面板已更新", ["v0.3.38 → v0.3.40", "面板已重启并运行新版本"])])
+        sent.clear()
+        self.app.PANEL_VERSION = "0.3.38"
+        self.app.update_auto_update_item("panel", last_result="started", to="v0.3.40", **{"from": "v0.3.38"})
+        self.app.finish_panel_auto_update()
+        self.assertEqual(sent, [("failure", "管理面板更新失败", ["v0.3.38 → v0.3.40", "重启后仍是 v0.3.38", "继续运行当前版本"])])
+
     def test_upgrade_failure_is_recorded(self):
         self.app.upgrade_mosctl_panel = lambda ref=None, on_install=None: (False, "下载失败", False)
         plan = self.auto.plan_panel(self.settings(0), now=NOW)
@@ -579,6 +628,54 @@ class RunOrderTest(Base):
         self.assertEqual(calls, [], "关闭后定时任务不执行")
         self.auto.run(self.args(manual=True, only="core"))
         self.assertEqual(calls, ["plan_core", "install_core"], "面板里手动点“立即更新”仍执行")
+
+    def capture_notifications(self):
+        sent = []
+        self.app.notify_event = lambda level, subject, lines=None, background=False, env=None: sent.append((level, subject, lines))
+        return sent
+
+    def test_notifications_per_item(self):
+        self.install_fakes()
+        sent = self.capture_notifications()
+        self.app.install_mosdns_core = lambda release=None: {
+            "result": "updated", "message": "ok", "from": "v5.3.3", "to": "v5.3.4",
+            "summary": ["健康检查通过：服务、国内解析、国外解析"],
+        }
+        self.auto.run(self.args())
+        # 面板 started 不发，等新面板启动后发
+        self.assertEqual(sent, [("success", "mosdns 内核已更新", ["v5.3.3 → v5.3.4", "健康检查通过：服务、国内解析、国外解析"])])
+
+        sent.clear()
+        self.app.install_mosdns_core = lambda release=None: {
+            "result": "rolled_back", "message": "x", "from": "v5.3.3", "to": "v5.3.4",
+            "summary": ["健康检查未通过：国外解析", "已恢复旧版本"],
+        }
+        self.app.upgrade_mosctl_panel = lambda ref=None, on_install=None: (False, "下载面板源码失败：\nconnection refused", False)
+        self.auto.run(self.args())
+        self.assertEqual(sent, [
+            ("failure", "mosdns 内核更新失败，已回滚", ["v5.3.3 → v5.3.4", "健康检查未通过：国外解析", "已恢复旧版本"]),
+            ("failure", "管理面板更新失败", ["v0.3.38 → v0.3.39", "下载面板源码失败", "继续运行 v0.3.38"]),
+        ])
+
+    def test_no_notifications_for_dry_run_or_up_to_date(self):
+        self.install_fakes()
+        sent = self.capture_notifications()
+        self.auto.run(self.args(dry_run=True))
+        self.app.install_mosdns_core = lambda release=None: {"result": "up_to_date", "message": "x", "from": "v5.3.3", "to": "v5.3.3"}
+        self.app.upgrade_mosctl_panel = lambda ref=None, on_install=None: (True, "已是最新", False)
+        self.auto.run(self.args())
+        self.assertEqual(sent, [])
+
+    def test_exception_notifies_without_internal_text(self):
+        self.install_fakes()
+        sent = self.capture_notifications()
+
+        def boom(settings, now=None):
+            raise RuntimeError("Traceback secret")
+
+        self.auto.plan_core = boom
+        self.auto.run(self.args(only="core"))
+        self.assertEqual(sent, [("failure", "mosdns 内核更新失败", ["检查或安装时出错", "详情见自动更新日志"])])
 
     def test_rollback_sets_exit_code_and_core_error_does_not_block_panel(self):
         calls = self.install_fakes()
@@ -640,7 +737,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, install)
 
     def test_panel_version(self):
-        self.assertIn('PANEL_VERSION = "0.3.38"', APP.read_text(encoding="utf-8"))
+        self.assertIn('PANEL_VERSION = "0.3.39"', APP.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

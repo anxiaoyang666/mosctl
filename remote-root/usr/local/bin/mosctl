@@ -3,6 +3,8 @@
 RESCUE_DNS="223.5.5.5"
 ENV_FILE="/etc/mosdns/.env"
 MANAGER_APP="/etc/mosdns/manager/app.py"
+# 通知（开关、地址、去重都在面板的 Python 里，这里只上报事件）
+NOTIFY_CLI="/etc/mosdns/manager/notify_cli.py"
 # 只读取需要的键，不 source 整个文件：.env 的值来自 Web 面板，不能当作 shell 代码执行
 env_get() {
     [ -f "$ENV_FILE" ] || return 0
@@ -482,14 +484,24 @@ rules_menu() {
     esac
 }
 
+# 发通知：失败去重、恢复才发，都由 notify_cli.py 处理；没装或出错都不影响本脚本，也不往更新日志里打字
+notify_cli() {
+    [ -f "$NOTIFY_CLI" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 "$NOTIFY_CLI" "$@" >/dev/null 2>&1 || true
+}
+
 # 结尾固定打印「===== 结果: 成功/失败 =====」，面板从 /var/log/mosctl-update.log 里读这一行判断上次结果
 update_geo_rules() {
     echo "===== $(date '+%F %T') 更新 Geo 规则 ====="
+    GEO_FAIL_REASON=""
     if do_update_geo_rules; then
+        notify_cli --key geo --event ok "Geo 规则更新已恢复" "规则文件已更新，mosdns 已重启"
         echo "===== 结果: 成功 ====="
         return 0
     fi
     echo -e "${RED}❌ 规则更新失败${PLAIN}"
+    notify_cli --key geo --event fail "Geo 规则更新失败" "${GEO_FAIL_REASON:-更新失败，详情见更新日志}"
     echo "===== 结果: 失败 ====="
     return 1
 }
@@ -520,6 +532,7 @@ do_update_geo_rules() {
         else
             rm -f "$tmp"
             echo -e "${RED}❌ 下载失败：${source}${PLAIN}"
+            GEO_FAIL_REASON="$(basename "$target") 下载失败"
             return 1
         fi
     }
@@ -538,7 +551,9 @@ do_update_geo_rules() {
         [ -e "$ref" ] || touch "$ref"
     done
     systemctl reset-failed mosdns 2>/dev/null
+    GEO_FAIL_REASON="规则已下载，但 mosdns 重启失败"
     systemctl restart mosdns || return 1
+    GEO_FAIL_REASON=""
     echo -e "${GREEN}✅ 规则更新完毕！${PLAIN}"
 }
 
@@ -570,7 +585,7 @@ uninstall_mosdns() {
         rm -rf /etc/mosdns
         rm -f /usr/local/bin/mosdns
         rm -f /usr/local/bin/mosdns-web
-        rm -f /var/log/mosdns.log /var/log/mosctl-update.log /var/log/mosctl-auto-update.log
+        rm -f /var/log/mosdns.log /var/log/mosctl-update.log /var/log/mosctl-auto-update.log /var/log/mosctl-notify.log
         
         # Geo 更新和自动更新（# MOSCTL_AUTO_UPDATE）两条定时任务都要清掉
         crontab -l 2>/dev/null | grep -v "mosctl update" | grep -v "MOSCTL_AUTO_UPDATE" | grep -v "auto_update.py" | crontab -

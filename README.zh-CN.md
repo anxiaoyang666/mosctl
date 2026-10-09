@@ -55,10 +55,17 @@ WEB_PORT=7840 WEB_USER=admin WEB_SECRET='your-password' bash -c "$(curl -fsSL ht
 - `AUTO_UPDATE_TIME`：自动更新时间（服务器本地时间，`HH:MM`），默认 `04:10`
 - `AUTO_UPDATE_CORE_MIN_AGE_DAYS`：mosdns 稳定版发布满几天才自动更新（0–365），默认 `3`
 - `AUTO_UPDATE_PANEL_MIN_AGE_DAYS`：面板分支上改动 `remote-root/` 的最新提交满几天才自动更新（0–365），默认 `0`
+- `SITE_NAME`：通知标题里的站点名（最多 20 个字符），留空显示 `mosdns`
+- `NOTIFY_ENABLED`：`true` / `false`，是否发送通知，默认 `false`
+- `NOTIFY_API_URL`：通知 Webhook 地址（`http://` 或 `https://`），以 JSON `{"title", "content"}` POST，直连不走代理；页面上只显示主机名
 
 ## 自动更新
 
 面板启动和保存设置时会在 crontab 写入一行带 `# MOSCTL_AUTO_UPDATE` 标记的任务，按 `AUTO_UPDATE_TIME` 运行 `python3 /etc/mosdns/manager/auto_update.py`（可加 `--dry-run`、`--only core|panel`）。每次先更新内核、最后更新面板：内核只装发布满指定天数的稳定版、绝不降级，替换前用新内核在沙盒里跑当前配置，替换后 20 秒内检查服务状态、版本以及国内 / 国外域名解析，不通过就自动回滚。结果写入 `/etc/mosdns/auto_update_state.json` 和 `/var/log/mosctl-auto-update.log`，在「运行维护 → 自动更新」查看。
+
+## 通知
+
+在「运行维护 → 通知」填写站点名和 Webhook 地址并开启后，以下事件会发送通知（与 mihomo 面板格式一致，标题为 `图标 站点名 · 事件`，正文末尾附服务器时间）：自动更新的内核 / 面板已更新、失败或回滚；Geo 规则更新失败与恢复；收到的同步规则未能应用与恢复；解析策略修改后 mosdns 重启失败并回滚。反复出现的失败只在状态变化时通知，仍未恢复时最多每 3 天提醒一次（状态在 `/etc/mosdns/notify_state.json`）。发送记录写入 `/var/log/mosctl-notify.log`（只记主机名）。
 
 ## 规则同步
 

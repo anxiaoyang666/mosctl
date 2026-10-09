@@ -55,10 +55,17 @@ The installer writes `/etc/mosdns/.env` (mode `600`). The Web panel reads and up
 - `AUTO_UPDATE_TIME`: daily auto-update time (server local time, `HH:MM`), default `04:10`
 - `AUTO_UPDATE_CORE_MIN_AGE_DAYS`: only install a stable mosdns release once it is at least this many days old (0–365), default `3`
 - `AUTO_UPDATE_PANEL_MIN_AGE_DAYS`: only update the panel once the newest commit touching `remote-root/` on the branch is at least this many days old (0–365), default `0`
+- `SITE_NAME`: site name shown in notification titles (up to 20 characters); empty shows `mosdns`
+- `NOTIFY_ENABLED`: `true` / `false`, send notifications, default `false`
+- `NOTIFY_API_URL`: notification webhook (`http://` or `https://`), POSTed JSON `{"title", "content"}` directly without a proxy; the panel only shows its host
 
 ## Auto Update
 
 On startup and whenever its settings are saved, the panel keeps one crontab line tagged `# MOSCTL_AUTO_UPDATE` that runs `python3 /etc/mosdns/manager/auto_update.py` at `AUTO_UPDATE_TIME` (`--dry-run` and `--only core|panel` are available). Each run updates the core first and the panel last. The core only moves to stable releases old enough, never downgrades, is first started in a sandbox against the live config, and must pass a 20-second health check (service active, reported version, domestic and foreign lookups on 127.0.0.1:53) or the old binary is restored. Results go to `/etc/mosdns/auto_update_state.json` and `/var/log/mosctl-auto-update.log` and show up under 运行维护 → 自动更新.
+
+## Notifications
+
+After setting a site name and webhook under 运行维护 → 通知 and enabling it, the panel notifies (same format as the mihomo panel: title `icon site · event`, server time appended to the body) when auto-update installs, fails or rolls back the core or the panel; when the Geo update fails or recovers; when received rule-sync content cannot be applied or recovers; and when a 解析策略 change makes mosdns fail to restart and is rolled back. Recurring failures only notify on state changes, with a reminder at most every 3 days while still failing (state in `/etc/mosdns/notify_state.json`). Sends are logged to `/var/log/mosctl-notify.log` (host only).
 
 ## Rule Sync
 

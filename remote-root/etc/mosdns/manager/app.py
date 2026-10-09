@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.38"
+PANEL_VERSION = "0.3.39"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -382,6 +382,361 @@ def ensure_env():
         write_env(updates)
         env.update(updates)
     app.secret_key = env["WEB_SESSION_SECRET"]
+
+
+# ---------- 通知（Webhook → 微信） ----------
+# 和 mihomo 面板同一个 webhook：POST JSON {"title", "content"}，不渲染 Markdown，只认纯文本换行和 emoji。
+# 标题 "{图标} {站点名} · {事件}"，正文每行一个事实、最多 4 行，末尾附 "📅 服务器本地时间"。
+NOTIFY_LOG = "/var/log/mosctl-notify.log"
+NOTIFY_STATE_FILE = f"{MOSDNS_DIR}/notify_state.json"
+NOTIFY_STATE_LOCK_FILE = f"{MOSDNS_DIR}/.notify_state.lock"
+NOTIFY_TIMEOUT = 15
+NOTIFY_MAX_LINES = 4
+NOTIFY_LINE_MAX_CHARS = 80
+NOTIFY_REMIND_SECONDS = 3 * 86400
+NOTIFY_URL_MAX_LEN = 500
+SITE_NAME_MAX_LEN = 20
+DEFAULT_SITE_NAME = "mosdns"
+# 通知正文里的时间是给微信里的人看的服务器本地时间（不经过浏览器格式化），和 mihomo 的 notify.sh 一致
+NOTIFY_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+NOTIFY_ICONS = {"success": "✅", "warning": "⚠️", "failure": "❌", "info": "🔔"}
+NOTIFY_STATE_THREAD_LOCK = threading.Lock()
+
+
+def site_name_error(value):
+    if not isinstance(value, str):
+        return "站点名称必须是字符串"
+    if len(value) > SITE_NAME_MAX_LEN:
+        return f"站点名称最多 {SITE_NAME_MAX_LEN} 个字符"
+    if "'" in value or env_value_error(value) or any(ord(char) < 32 for char in value):
+        return "站点名称不能包含引号、反斜杠、$、反引号或换行"
+    return None
+
+
+def site_name(env=None):
+    env = read_env() if env is None else env
+    value = str(env.get("SITE_NAME", "")).strip()
+    if not value or site_name_error(value):
+        return DEFAULT_SITE_NAME
+    return value
+
+
+def notify_url_error(url):
+    if not isinstance(url, str) or not url:
+        return "Webhook 地址不能为空"
+    if len(url) > NOTIFY_URL_MAX_LEN:
+        return f"Webhook 地址最多 {NOTIFY_URL_MAX_LEN} 个字符"
+    if any(char.isspace() for char in url) or "'" in url or env_value_error(url):
+        return "Webhook 地址不能包含空白、引号、反斜杠、$ 或反引号"
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return "Webhook 地址格式不正确"
+    if parts.scheme not in ("http", "https") or not host:
+        return "Webhook 地址必须以 http:// 或 https:// 开头并包含主机名"
+    return None
+
+
+def notify_url_host(url):
+    """只给日志和页面看主机名（含端口）：路径和查询串里常带 key，一律不外露。"""
+    try:
+        parts = urlsplit(str(url or ""))
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{port}" if host and port else host
+
+
+def read_notify_settings(env=None):
+    env = read_env() if env is None else env
+    url = str(env.get("NOTIFY_API_URL", "")).strip()
+    url_ok = bool(url) and not notify_url_error(url)
+    host = notify_url_host(url) if url_ok else ""
+    return {
+        "site_name": str(env.get("SITE_NAME", "")).strip(),
+        "site_name_effective": site_name(env),
+        "enabled": is_true(env.get("NOTIFY_ENABLED")),
+        "url_set": url_ok,
+        "url_host": host,
+        "url_display": f"{host} 已设置" if url_ok else "未设置",
+    }
+
+
+def validate_notify_settings(data, env=None):
+    """返回 (要写入 .env 的键值, 错误)。URL 留空表示沿用已保存的；clear_url=true 才清空。"""
+    if not isinstance(data, dict):
+        return None, "请求格式不正确"
+    env = read_env() if env is None else env
+    site = data.get("site_name", "")
+    site = site.strip() if isinstance(site, str) else site
+    error_message = site_name_error(site)
+    if error_message:
+        return None, error_message
+    enabled = data.get("enabled")
+    if isinstance(enabled, str) and enabled.lower() in ("true", "false"):
+        enabled = enabled.lower() == "true"
+    if not isinstance(enabled, bool):
+        return None, "通知开关必须是 true 或 false"
+    updates = {"SITE_NAME": site, "NOTIFY_ENABLED": "true" if enabled else "false"}
+    url = data.get("url", "")
+    url = url.strip() if isinstance(url, str) else url
+    if data.get("clear_url") in (True, "true"):
+        updates["NOTIFY_API_URL"] = ""
+    elif url:
+        error_message = notify_url_error(url)
+        if error_message:
+            return None, error_message
+        updates["NOTIFY_API_URL"] = url
+    final_url = updates.get("NOTIFY_API_URL", str(env.get("NOTIFY_API_URL", "")).strip())
+    if enabled and (not final_url or notify_url_error(final_url)):
+        return None, "启用通知前请先填写 Webhook 地址"
+    return updates, None
+
+
+def save_notify_settings(data):
+    updates, error_message = validate_notify_settings(data)
+    if error_message:
+        return False, error_message
+    write_env(updates)
+    return True, "通知设置已保存"
+
+
+def notify_short_line(text, limit=NOTIFY_LINE_MAX_CHARS):
+    """取一段说明的第一行做通知正文：去掉结尾冒号，过长截断。"""
+    for line in clean_output(str(text or "")).splitlines():
+        line = line.strip().rstrip("：:").strip()
+        if line:
+            return line if len(line) <= limit else line[: limit - 1] + "…"
+    return ""
+
+
+def build_notification(level, subject, lines, site=None, now=None):
+    icon = NOTIFY_ICONS.get(level, NOTIFY_ICONS["info"])
+    site = site or DEFAULT_SITE_NAME
+    title = f"{icon} {site} · {notify_short_line(subject, 60)}"
+    body = []
+    for line in lines or []:
+        line = notify_short_line(line)
+        if line:
+            body.append(line)
+    body = body[:NOTIFY_MAX_LINES]
+    stamp = (datetime.fromtimestamp(now) if now else datetime.now()).strftime(NOTIFY_TIME_FORMAT)
+    content = ("\n".join(body) + "\n\n" if body else "") + f"📅 {stamp}"
+    return title, content
+
+
+def log_notify(message):
+    stamp = datetime.now().strftime(NOTIFY_TIME_FORMAT)
+    try:
+        with open(NOTIFY_LOG, "a", encoding="utf-8") as file:
+            file.write(f"[{stamp}] {message}\n")
+    except OSError:
+        pass
+
+
+def notify_urlopen(req, timeout):
+    # 直连，不走环境变量里的 http(s)_proxy：webhook 通常在内网或国内
+    opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
+    return opener.open(req, timeout=timeout)
+
+
+def scrub_notify_error(text, url):
+    text = str(text or "")
+    try:
+        parts = urlsplit(url)
+        secrets_in_url = [url, parts.path, parts.query]
+    except ValueError:
+        secrets_in_url = [url]
+    for secret in secrets_in_url:
+        if secret and len(secret) > 1:
+            text = text.replace(secret, "***")
+    return " ".join(text.split())[:200]
+
+
+def post_notification(url, title, content, timeout=NOTIFY_TIMEOUT):
+    """返回 (ok, http 状态码或 0, 说明)。说明里不含 URL。"""
+    payload = json.dumps({"title": title, "content": content}, ensure_ascii=False).encode("utf-8")
+    req = urlrequest.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json; charset=utf-8", "User-Agent": "mosctl-notify"},
+        method="POST",
+    )
+    try:
+        with notify_urlopen(req, timeout) as response:
+            status = int(getattr(response, "status", 0) or response.getcode() or 0)
+    except error.HTTPError as exc:
+        try:
+            exc.close()
+        except Exception:
+            pass
+        return False, int(exc.code or 0), f"HTTP {exc.code}"
+    except error.URLError as exc:
+        return False, 0, scrub_notify_error(exc.reason, url) or "连接失败"
+    except Exception as exc:
+        return False, 0, scrub_notify_error(f"{type(exc).__name__}: {exc}", url)
+    if 200 <= status < 300:
+        return True, status, f"HTTP {status}"
+    return False, status, f"HTTP {status}"
+
+
+def send_notification(level, subject, lines, url, site, now=None):
+    title, content = build_notification(level, subject, lines, site=site, now=now)
+    host = notify_url_host(url)
+    ok, status, detail = post_notification(url, title, content)
+    if ok:
+        log_notify(f"sent host={host} {detail} title={title}")
+        return {"success": True, "status": status, "message": f"已发送（{detail}）", "title": title, "content": content}
+    log_notify(f"failed host={host} error={detail} title={title}")
+    return {"success": False, "status": status, "message": f"发送失败：{detail}", "title": title, "content": content}
+
+
+def notify_event(level, subject, lines=None, background=False, env=None):
+    """发一条通知。未启用或没配地址直接跳过；任何异常都吞掉，不影响调用方。
+
+    background=True 时在后台线程里发（Web 请求里用，避免 webhook 慢拖住页面）。
+    """
+    if background:
+        try:
+            threading.Thread(target=notify_event, args=(level, subject, lines), kwargs={"env": env}, daemon=True).start()
+        except Exception:
+            pass
+        return None
+    try:
+        env = read_env() if env is None else env
+        if not is_true(env.get("NOTIFY_ENABLED")):
+            return {"success": False, "skipped": True, "message": "通知未启用"}
+        url = str(env.get("NOTIFY_API_URL", "")).strip()
+        if notify_url_error(url):
+            return {"success": False, "skipped": True, "message": "Webhook 地址未设置"}
+        return send_notification(level, subject, lines, url, site_name(env))
+    except Exception as exc:
+        try:
+            log_notify(f"error {type(exc).__name__} subject={subject}")
+        except Exception:
+            pass
+        return {"success": False, "message": "发送通知时出错"}
+
+
+def send_test_notification(data):
+    """“发送测试通知”：表单里填了地址/站点名就用表单的（不必先保存），否则用已保存的。不看启用开关。"""
+    data = data if isinstance(data, dict) else {}
+    env = read_env()
+    url = str(data.get("url") or "").strip() or str(env.get("NOTIFY_API_URL", "")).strip()
+    error_message = notify_url_error(url)
+    if error_message:
+        return {"success": False, "message": "请先填写 Webhook 地址" if not url else error_message}
+    site = data.get("site_name")
+    site = site.strip() if isinstance(site, str) else ""
+    if site and site_name_error(site):
+        return {"success": False, "message": site_name_error(site)}
+    try:
+        result = send_notification("info", "通知测试", ["通知通道正常"], url, site or site_name(env))
+    except Exception:
+        return {"success": False, "message": "发送通知时出错"}
+    return {"success": result["success"], "message": result["message"], "status": result["status"], "host": notify_url_host(url)}
+
+
+def read_notify_state():
+    try:
+        with open(NOTIFY_STATE_FILE, "r", encoding="utf-8") as file:
+            state = json.load(file)
+    except (OSError, ValueError):
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+def write_notify_state(state):
+    os.makedirs(os.path.dirname(NOTIFY_STATE_FILE), exist_ok=True)
+    tmp_file = f"{NOTIFY_STATE_FILE}.{os.getpid()}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
+    os.replace(tmp_file, NOTIFY_STATE_FILE)
+
+
+def update_notify_state(key, decide):
+    """在锁内读 notify_state.json → decide(旧条目) 返回 (新条目, 动作) → 写回。CLI 与面板共用这个文件，用 flock 串行。"""
+    with NOTIFY_STATE_THREAD_LOCK:
+        os.makedirs(os.path.dirname(NOTIFY_STATE_LOCK_FILE), exist_ok=True)
+        fd = os.open(NOTIFY_STATE_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            state = read_notify_state()
+            entry = state.get(key) if isinstance(state.get(key), dict) else {}
+            new_entry, action = decide(dict(entry))
+            if new_entry != entry:
+                state[key] = new_entry
+                write_notify_state(state)
+            return action
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+def notify_failure(key, level, subject, lines, now=None, background=False):
+    """反复出现的失败（Geo 更新、收到的规则同步）：状态变为失败时发一次，之后仍失败最多每 3 天提醒一次。
+
+    返回动作：notified / reminded / suppressed / disabled / error。
+    """
+    if background:
+        threading.Thread(target=notify_failure, args=(key, level, subject, lines), kwargs={"now": now}, daemon=True).start()
+        return None
+    try:
+        env = read_env()
+        if not is_true(env.get("NOTIFY_ENABLED")) or notify_url_error(str(env.get("NOTIFY_API_URL", "")).strip()):
+            return "disabled"
+        now = int(time.time() if now is None else now)
+        lines = list(lines or [])
+
+        def decide(entry):
+            if not entry.get("failing"):
+                result = notify_event(level, subject, lines, env=env)
+                sent = bool(result and result.get("success"))
+                # 没发出去 last_notified 记 0，下次失败按“持续失败”补发
+                return {"failing": True, "since": now, "last_notified": now if sent else 0, "subject": subject}, "notified"
+            if now - int(entry.get("last_notified") or 0) < NOTIFY_REMIND_SECONDS:
+                return entry, "suppressed"
+            since = int(entry.get("since") or now)
+            day = (now - since) // 86400 + 1
+            reminder = lines[: NOTIFY_MAX_LINES - 1] + [f"持续失败第 {day} 天"]
+            result = notify_event(level, subject, reminder, env=env)
+            if result and result.get("success"):
+                entry["last_notified"] = now
+            return entry, "reminded"
+
+        return update_notify_state(key, decide)
+    except Exception as exc:
+        log_notify(f"error {type(exc).__name__} key={key}")
+        return "error"
+
+
+def notify_recovery(key, subject, lines, now=None, background=False):
+    """之前记为失败的事项恢复了：发一条 ✅，清掉失败状态。之前没失败就什么都不做。返回 recovered / none / disabled / error。"""
+    if background:
+        threading.Thread(target=notify_recovery, args=(key, subject, lines), kwargs={"now": now}, daemon=True).start()
+        return None
+    try:
+        env = read_env()
+        enabled = is_true(env.get("NOTIFY_ENABLED")) and not notify_url_error(str(env.get("NOTIFY_API_URL", "")).strip())
+        now = int(time.time() if now is None else now)
+
+        def decide(entry):
+            if not entry.get("failing"):
+                return entry, "none"
+            if enabled:
+                notify_event("success", subject, lines, env=env)
+            return {"failing": False, "recovered_at": now}, ("recovered" if enabled else "disabled")
+
+        return update_notify_state(key, decide)
+    except Exception as exc:
+        log_notify(f"error {type(exc).__name__} key={key}")
+        return "error"
 
 
 def gh_proxy_prefix():
@@ -920,6 +1275,25 @@ def restart_or_rollback(rollbacks, success_message, failure_prefix):
     return False, text
 
 
+def notify_if_rolled_back(subject, result):
+    """包住 restart_or_rollback 的结果：失败（= 改动后 mosdns 重启失败）时发 ❌ 通知，结果原样返回。
+
+    解析策略里的手动修改也要通知：回滚前服务已经中断过，回滚后重启也可能仍失败。
+    """
+    ok, message = result
+    if not ok:
+        text = str(message or "")
+        lines = ["改动后 mosdns 重启失败"]
+        if "没有可回滚的备份" in text:
+            lines.append("没有可回滚的备份，请立即检查")
+        elif "回滚后重启仍失败" in text:
+            lines += ["已恢复修改前的文件，但重启仍失败", "请立即检查，必要时启用救援模式"]
+        else:
+            lines.append("已恢复修改前的文件，服务已重启")
+        notify_event("failure", subject, lines, background=True)
+    return ok, message
+
+
 def restore_default_template():
     ok, message, _details = restore_default_template_details()
     return ok, message
@@ -992,6 +1366,7 @@ def restore_default_template_details():
         "已恢复内置默认配置，并保留当前上游 DNS（含备用国内 DNS）与 TTL。",
         "默认配置已写入",
     )
+    ok, message = notify_if_rolled_back("恢复默认配置已回滚", (ok, message))
     return ok, message, details
 
 
@@ -1532,6 +1907,20 @@ def core_health_check(expected_version=None, timeout=None):
         time.sleep(CORE_HEALTH_INTERVAL)
 
 
+def health_failure_summary(message):
+    """把 core_health_check 的失败说明归纳成一句给通知用的话。"""
+    labels = []
+    text = str(message or "")
+    if "服务不是 active" in text:
+        labels.append("服务")
+    if "version 报告" in text:
+        labels.append("版本")
+    for domain, label in zip(CORE_HEALTH_DOMAINS, ("国内解析", "国外解析")):
+        if f"DNS 查询失败：{domain}" in text:
+            labels.append(label)
+    return "健康检查未通过：" + "、".join(labels) if labels else "新内核启动失败"
+
+
 def replace_binary(source, target):
     # 先拷到同目录临时文件再 rename：不会出现半个二进制，也不怕 "Text file busy"
     tmp_path = f"{target}.mosctl-new"
@@ -1621,15 +2010,19 @@ def install_mosdns_core(release=None):
     → 备份旧内核 → 停服务、替换、重启 → 20 秒健康检查 → 不通过就恢复旧内核并复查。
     返回 {result: updated|up_to_date|failed|rolled_back, message, from, to}。
     """
-    outcome = {"result": "failed", "message": "", "from": "", "to": ""}
+    # summary：给通知用的几行大白话（不含日志原文）；替换前就失败的统一补一句“现有内核未改动”
+    outcome = {"result": "failed", "message": "", "from": "", "to": "", "summary": []}
 
-    def done(result, message):
-        outcome.update(result=result, message=message)
+    def done(result, message, summary=None, untouched=True):
+        lines = list(summary or [])
+        if result == "failed" and untouched:
+            lines.append("现有内核未改动")
+        outcome.update(result=result, message=message, summary=lines)
         return outcome
 
     asset = mosdns_asset_name()
     if not asset:
-        return done("failed", "当前 CPU 架构暂不支持自动升级")
+        return done("failed", "当前 CPU 架构暂不支持自动升级", ["当前 CPU 架构没有官方安装包"])
 
     old_ok, old_version = run_cmd([MOSDNS_BIN, "version"], timeout=10) if os.path.exists(MOSDNS_BIN) else (False, "未知")
     old_version = old_version.splitlines()[0] if old_ok and old_version else old_version
@@ -1637,7 +2030,7 @@ def install_mosdns_core(release=None):
     if release is None:
         latest = latest_mosdns_release()
         if not latest.get("success"):
-            return done("failed", latest.get("message", "获取最新版本失败，已取消升级"))
+            return done("failed", latest.get("message", "获取最新版本失败，已取消升级"), ["获取最新版本失败"])
         tag = latest.get("latest")
         asset_available = latest.get("asset_available")
         direct_url = f"{MOSDNS_RELEASE_BASE}/{asset}"
@@ -1649,16 +2042,16 @@ def install_mosdns_core(release=None):
     latest_v = version_tuple(tag)
     outcome["to"] = clean_version(tag)
     if not latest_v:
-        return done("failed", f"无法识别目标版本号：{tag or '空'}，已取消升级")
+        return done("failed", f"无法识别目标版本号：{tag or '空'}，已取消升级", ["无法识别目标版本号"])
     if current_v and latest_v <= current_v:
         return done(
             "up_to_date",
             f"当前版本不低于目标版本，已取消升级（不降级）。\n当前版本：{clean_version(old_version)}\n目标版本：{clean_version(tag)}",
         )
     if not asset_available:
-        return done("failed", f"{clean_version(tag)} 未发现当前架构安装包：{asset}")
+        return done("failed", f"{clean_version(tag)} 未发现当前架构安装包：{asset}", ["目标版本没有当前架构的安装包"])
     if not os.path.exists(CONFIG_FILE):
-        return done("failed", f"找不到 {CONFIG_FILE}，无法用新内核做沙盒校验，已取消升级")
+        return done("failed", f"找不到 {CONFIG_FILE}，无法用新内核做沙盒校验，已取消升级", ["找不到当前配置，无法校验新内核"])
 
     urls = github_url_candidates(direct_url)
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -1669,18 +2062,18 @@ def install_mosdns_core(release=None):
         zip_path = os.path.join(tmpdir, asset)
         ok, source = download_file(urls, zip_path)
         if not ok:
-            return done("failed", "下载 mosdns 内核失败：\n" + source)
+            return done("failed", "下载 mosdns 内核失败：\n" + source, ["下载新内核失败"])
 
         # 官方 release 没有 checksum 文件，只能做 zip 完整性校验
         zip_ok, zip_message = verify_zip_file(zip_path)
         if not zip_ok:
-            return done("failed", f"{zip_message}，已取消升级")
+            return done("failed", f"{zip_message}，已取消升级", ["下载的安装包已损坏"])
         extract_dir = os.path.join(tmpdir, "extract")
         try:
             with zipfile.ZipFile(zip_path) as archive:
                 archive.extractall(extract_dir)
         except zipfile.BadZipFile:
-            return done("failed", "下载文件不是有效 zip，已取消升级")
+            return done("failed", "下载文件不是有效 zip，已取消升级", ["下载的安装包已损坏"])
 
         candidate = None
         new_version = ""
@@ -1701,21 +2094,29 @@ def install_mosdns_core(release=None):
             if candidate:
                 break
         if not candidate:
-            return done("failed", "压缩包里没有找到可运行的 mosdns 二进制")
+            return done("failed", "压缩包里没有找到可运行的 mosdns 二进制", ["安装包里没有可运行的内核"])
         if version_tuple(new_version) != latest_v:
-            return done("failed", f"压缩包里的内核报告版本 {clean_version(new_version)}，与目标 {clean_version(tag)} 不符，已取消升级")
+            return done(
+                "failed",
+                f"压缩包里的内核报告版本 {clean_version(new_version)}，与目标 {clean_version(tag)} 不符，已取消升级",
+                ["安装包里的版本与目标不符"],
+            )
 
         # 先用新内核在沙盒里跑一遍当前配置：跑不起来就放弃，正在用的内核一点不动
         sandbox_ok, sandbox_message = config_starts(CONFIG_FILE, binary=candidate)
         if not sandbox_ok:
-            return done("failed", "新内核无法用当前配置启动（沙盒校验失败），已放弃升级，现有内核未改动：\n" + sandbox_message)
+            return done(
+                "failed",
+                "新内核无法用当前配置启动（沙盒校验失败），已放弃升级，现有内核未改动：\n" + sandbox_message,
+                ["新内核无法用当前配置启动"],
+            )
 
         if os.path.exists(MOSDNS_BIN):
             shutil.copy2(MOSDNS_BIN, backup_bin)
 
         stop_ok, stop_message = run_cmd(["systemctl", "stop", "mosdns"], timeout=30)
         if not stop_ok:
-            return done("failed", "停止 mosdns 失败，未替换内核：\n" + stop_message)
+            return done("failed", "停止 mosdns 失败，未替换内核：\n" + stop_message, ["停止 mosdns 失败"])
         try:
             replace_binary(candidate, MOSDNS_BIN)
             ok, restart_message = restart_mosdns()
@@ -1730,28 +2131,40 @@ def install_mosdns_core(release=None):
                 "updated",
                 f"mosdns 内核升级完成。\n来源：{source}\n旧版本：{clean_version(old_version)}\n新版本：{clean_version(new_version)}\n"
                 f"{restart_message}\n旧内核备份：{backup_bin}",
+                ["健康检查通过：服务、国内解析、国外解析"],
             )
 
         # 回滚本身也可能失败（磁盘满、权限等），要把原因说清楚而不是抛 500
+        problem = health_failure_summary(restart_message)
         if not os.path.exists(backup_bin):
-            return done("failed", "新内核未通过启动/健康检查，且没有旧内核备份可回滚，请手动处理：\n" + restart_message)
+            return done(
+                "failed",
+                "新内核未通过启动/健康检查，且没有旧内核备份可回滚，请手动处理：\n" + restart_message,
+                [problem, "没有旧内核备份，请立即检查"],
+                untouched=False,
+            )
         try:
             replace_binary(backup_bin, MOSDNS_BIN)
         except Exception as exc:
             return done(
                 "failed",
                 f"新内核未通过启动/健康检查，回滚旧内核也失败（{exc}），请手动把 {backup_bin} 复制回 {MOSDNS_BIN}：\n{restart_message}",
+                [problem, "恢复旧版本失败，请立即检查"],
+                untouched=False,
             )
         rollback_ok, rollback_message = restart_mosdns()
         text = "新内核未通过启动/健康检查，已回滚旧内核：\n" + restart_message
+        summary = [problem, "已恢复旧版本"]
         if not rollback_ok:
             text += "\n\n回滚后重启仍失败，请手动检查（必要时启用救援模式）：\n" + rollback_message
+            summary = [problem, "已恢复旧版本，但服务仍未启动，请立即检查"]
         else:
             recheck_ok, recheck_message = core_health_check(old_version if old_ok else None)
             text += "\n\n回滚后复查：" + recheck_message
             if not recheck_ok:
                 text += "\n请尽快检查，必要时启用救援模式。"
-        return done("rolled_back", text)
+                summary = [problem, "已恢复旧版本，但复查未通过，请尽快检查"]
+        return done("rolled_back", text, summary)
 
 
 def upgrade_mosdns_core():
@@ -2417,6 +2830,7 @@ def finish_panel_auto_update():
     target = panel_version_tuple(panel.get("to"))
     current = panel_version_tuple(PANEL_VERSION)
     now = int(time.time())
+    previous = panel.get("from") or "旧版本"
     if target and current and current >= target:
         update_auto_update_item(
             "panel",
@@ -2425,6 +2839,7 @@ def finish_panel_auto_update():
             current=PANEL_VERSION,
             message=f"面板已重启，当前运行 v{PANEL_VERSION}",
         )
+        notify_event("success", "管理面板已更新", [f"{previous} → v{PANEL_VERSION}", "面板已重启并运行新版本"], background=True)
         return True
     if auto_update_running():
         # 还在下载/安装中，面板因为别的原因重启了：交给自动更新进程自己收尾
@@ -2435,6 +2850,12 @@ def finish_panel_auto_update():
         last_result_at=now,
         current=PANEL_VERSION,
         message=f"面板重启后仍是 v{PANEL_VERSION}，预期 {panel.get('to') or '新版本'}",
+    )
+    notify_event(
+        "failure",
+        "管理面板更新失败",
+        [f"{previous} → {panel.get('to') or '新版本'}", f"重启后仍是 v{PANEL_VERSION}", "继续运行当前版本"],
+        background=True,
     )
     return True
 
@@ -2894,6 +3315,18 @@ def apply_synced_rules(rules):
     return restart_or_rollback(rollbacks, "已同步规则：" + ", ".join(applied), "规则已写入")
 
 
+def notify_rule_sync_receive(ok, message, source=""):
+    """收到其他面板推来的规则：应用失败发 ⚠️（去重，最多 3 天提醒一次），之后成功一次发“已恢复”。"""
+    if ok:
+        notify_recovery("rule_sync", "规则同步已恢复", ["其他面板推送的规则已正常应用"], background=True)
+        return
+    lines = []
+    if source:
+        lines.append(f"来源：{source}")
+    lines += [notify_short_line(message) or "规则未通过校验", "本机规则保持不变"]
+    notify_failure("rule_sync", "warning", "收到的同步规则未能应用", lines, background=True)
+
+
 def update_config_values(local_dns, remote_dns, ttl, local_backup=None):
     # local_backup=None 表示不动备用国内 DNS；空串表示删掉备用行
     if not os.path.exists(CONFIG_FILE):
@@ -2938,7 +3371,8 @@ def update_config_values(local_dns, remote_dns, ttl, local_backup=None):
         return False, "配置校验失败，未保存：\n" + message
     backup = backup_file(CONFIG_FILE, "config")
     write_config_text(new_text)
-    return restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
+    result = restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
+    return notify_if_rolled_back("DNS 参数修改已回滚", result)
 
 
 def config_api_address():
@@ -3307,7 +3741,8 @@ def api_config():
 
     backup = backup_file(CONFIG_FILE, "config")
     write_config_text(content)
-    ok, message = restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
+    result = restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")
+    ok, message = notify_if_rolled_back("config.yaml 修改已回滚", result)
     return jsonify({"success": ok, "message": message})
 
 
@@ -3401,6 +3836,22 @@ def api_auto_update_run():
     return jsonify({"success": ok, "message": message, **auto_update_overview()})
 
 
+@app.route("/api/notify-settings", methods=["GET", "POST"])
+@login_required
+def api_notify_settings():
+    # 响应里永远不带完整 Webhook 地址，只给主机名
+    if request.method == "GET":
+        return jsonify(read_notify_settings())
+    ok, message = save_notify_settings(json_body())
+    return jsonify({"success": ok, "message": message, **read_notify_settings()})
+
+
+@app.route("/api/notify-test", methods=["POST"])
+@login_required
+def api_notify_test():
+    return jsonify(send_test_notification(json_body()))
+
+
 def sync_token_matches(provided, expected):
     if not expected or not isinstance(provided, str):
         return False
@@ -3427,6 +3878,7 @@ def api_rule_sync():
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "请求体必须是 JSON 对象"}), 400
     ok, message = apply_synced_rules(data.get("rules"))
+    notify_rule_sync_receive(ok, message, client_address())
     return jsonify({"success": ok, "message": message})
 
 
@@ -3463,7 +3915,8 @@ def api_rules(rule_id):
         saved, save_message, rollback = save_rule_content(rule_id, content)
         if not saved:
             return jsonify({"success": False, "message": save_message})
-        ok, message = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
+        result = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
+        ok, message = notify_if_rolled_back(f"{meta['label']}规则修改已回滚", result)
     sync_job = None
     if ok and rule_id in SYNCABLE_RULE_IDS:
         # 同步在后台线程里进行，不占用本请求的操作锁；前端拿 sync_job 轮询结果

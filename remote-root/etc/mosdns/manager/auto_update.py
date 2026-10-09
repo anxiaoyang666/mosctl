@@ -10,6 +10,7 @@
 - 面板看 MOSCTL_BRANCH 上最近一次改动 remote-root/ 的提交，满 AUTO_UPDATE_PANEL_MIN_AGE_DAYS 天才装；
   需要判断天数但 GitHub 提交接口不可用时跳过，不会"查不到就照装"。
 - 结果写入 /etc/mosdns/auto_update_state.json，并追加到 /var/log/mosctl-auto-update.log。
+- 开启通知时，已更新 / 失败 / 已回滚各发一条（面板更新成功由新面板启动时发）。
 这里只 import app.py 里的函数，不会启动 Flask。
 """
 import argparse
@@ -63,6 +64,17 @@ def record_result(item, result, message, **fields):
     )
 
 
+def notify(level, subject, lines):
+    # 通知失败不影响更新流程（notify_event 自己吞异常，这里再兜一层）
+    try:
+        core.notify_event(level, subject, lines)
+    except Exception:
+        pass
+
+
+CORE_SUBJECTS = {"updated": ("success", "mosdns 内核已更新"), "failed": ("failure", "mosdns 内核更新失败"), "rolled_back": ("failure", "mosdns 内核更新失败，已回滚")}
+
+
 # ---------- mosdns 内核 ----------
 
 
@@ -112,6 +124,10 @@ def run_core(plan, dry_run):
         **{"from": outcome.get("from") or plan["current"], "to": outcome.get("to") or target},
     )
     log(f"内核：{result}\n{outcome['message']}", "core")
+    if result in CORE_SUBJECTS:
+        level, subject = CORE_SUBJECTS[result]
+        versions = f"{outcome.get('from') or plan['current']} → {outcome.get('to') or target}"
+        notify(level, subject, [versions] + list(outcome.get("summary") or []))
     return result, outcome["message"]
 
 
@@ -172,11 +188,19 @@ def run_panel(plan, dry_run):
     result = "up_to_date" if ok else "failed"
     record_result("panel", result, message, **{"from": plan["current"], "to": plan["current"]})
     log(f"面板：{result}\n{message}", "panel")
+    if result == "failed":
+        notify(
+            "failure",
+            "管理面板更新失败",
+            [f"{plan['current']} → {plan['target']}", core.notify_short_line(message) or "安装失败", f"继续运行 {plan['current']}"],
+        )
     return result, message
 
 
 # ---------- 入口 ----------
 
+
+ITEM_FAILED_SUBJECTS = {"core": "mosdns 内核更新失败", "panel": "管理面板更新失败"}
 
 RESULT_LABELS = {
     "update": "可更新",
@@ -226,6 +250,8 @@ def run(args, now=None):
                 record_result(item, "failed", message)
             log(f"{label}：异常 {message}", item)
             plan = {"current": "", "latest_eligible": ""}
+            if not args.dry_run:
+                notify("failure", ITEM_FAILED_SUBJECTS[item], ["检查或安装时出错", "详情见自动更新日志"])
         failed = failed or result in ("failed", "rolled_back")
         line = f"{label}：{RESULT_LABELS.get(result, result)}"
         if plan.get("current"):

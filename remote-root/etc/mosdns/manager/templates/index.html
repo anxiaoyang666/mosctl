@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="mosctl-version" content="{{ panel_version }}">
   <title>Mosctl 控制台</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="icon" href="{{ url_for('static', filename='mosctl-logo.svg') }}" type="image/svg+xml">
@@ -448,6 +449,14 @@
       padding: 12px;
     }
     .action-title { font-weight: 850; }
+    .update-table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
+    .update-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .update-table th, .update-table td { padding: 9px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--line-soft); }
+    .update-table thead th { border-top: 0; background: var(--surface-soft); color: var(--muted); font-size: 12px; font-weight: 800; }
+    .update-table .update-item { font-weight: 850; white-space: nowrap; }
+    .update-table .update-version { font-weight: 800; }
+    .update-table .update-sub { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .update-table .update-sub.warn { color: var(--amber); font-weight: 700; }
     .action-desc { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
     button, .link-btn {
       min-height: 42px;
@@ -676,6 +685,41 @@
       background: var(--primary-soft);
       color: #1d4ed8;
     }
+    .stale-banner {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 16px;
+      border-bottom: 1px solid #f3d38a;
+      background: var(--amber-soft);
+      color: var(--amber);
+      font-weight: 750;
+      text-align: center;
+    }
+    .stale-banner[hidden] { display: none; }
+    .rule-save-result {
+      margin-top: 12px;
+      border: 1px solid var(--line-soft);
+      border-left: 4px solid var(--primary);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--surface-soft);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
+    }
+    .rule-save-result[hidden] { display: none; }
+    .rule-save-result.ok { border-left-color: var(--green); background: var(--green-soft); }
+    .rule-save-result.warn { border-left-color: var(--amber); background: var(--amber-soft); }
+    .rule-save-result.error { border-left-color: var(--red); background: var(--red-soft); }
+    .rule-save-head { font-weight: 850; }
+    .rule-save-sync { margin-top: 4px; color: var(--muted); }
+    .rule-save-sync:empty { display: none; }
     .toast {
       position: fixed;
       right: 18px;
@@ -744,6 +788,10 @@
   </style>
 </head>
 <body>
+  <div class="stale-banner" id="staleBanner" role="alert" hidden>
+    <span id="staleBannerText">面板已升级，当前页面是旧版本，请刷新</span>
+    <button type="button" class="primary stale-refresh" onclick="location.reload()">刷新</button>
+  </div>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
   <div class="app-shell">
     <aside class="sidebar">
@@ -1004,6 +1052,10 @@
             </div>
             <textarea id="ruleContent" spellcheck="false"></textarea>
           </div>
+          <div class="rule-save-result" id="ruleSaveResult" role="status" aria-live="polite" hidden>
+            <div class="rule-save-head" id="ruleSaveHead"></div>
+            <div class="rule-save-sync" id="ruleSaveSync"></div>
+          </div>
         </section>
       </section>
 
@@ -1155,27 +1207,30 @@
                 <p class="hint" style="margin: 8px 0 0;">只看官方稳定版，跳过预发布，绝不降级。</p>
               </div>
               <div class="field">
-                <div class="field-title">面板提交满几天才更新</div>
+                <div class="field-title">面板发布满几天才更新</div>
                 <input id="autoUpdatePanelMinAge" inputmode="numeric" value="0">
-                <p class="hint" style="margin: 8px 0 0;">按分支上最近一次改动 remote-root/ 的提交时间；0 表示不等待。</p>
+                <p class="hint" style="margin: 8px 0 0;">新版面板发布后等几天再更新，0 表示有新版就更新</p>
               </div>
             </div>
             <p class="hint warn" id="autoUpdateCronWarning" hidden></p>
-            <div class="risk-action">
-              <div class="action-row">
-                <div>
-                  <div class="action-title">MosDNS 内核</div>
-                  <div class="hint" id="autoUpdateCoreVersions">当前：--，可更新到：--</div>
-                  <div class="action-desc" id="autoUpdateCoreResult" style="white-space: pre-wrap;">上次结果：--</div>
-                </div>
-              </div>
-              <div class="action-row">
-                <div>
-                  <div class="action-title">Mosctl 面板</div>
-                  <div class="hint" id="autoUpdatePanelVersions">当前：--，可更新到：--</div>
-                  <div class="action-desc" id="autoUpdatePanelResult" style="white-space: pre-wrap;">上次结果：--</div>
-                </div>
-              </div>
+            <div class="update-table-wrap">
+              <table class="update-table" id="autoUpdateTable">
+                <thead>
+                  <tr><th>项目</th><th>版本</th><th>上次检查</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="update-item">MosDNS 内核</td>
+                    <td id="autoUpdateCoreVersions">--</td>
+                    <td id="autoUpdateCoreResult">--</td>
+                  </tr>
+                  <tr>
+                    <td class="update-item">Mosctl 面板</td>
+                    <td id="autoUpdatePanelVersions">--</td>
+                    <td id="autoUpdatePanelResult">--</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
             <div class="actions" style="margin-top: 10px;">
               <button type="button" class="primary" onclick="saveAutoUpdate()">保存设置</button>
@@ -1345,6 +1400,10 @@
     let panelUpdateAvailable = false;
     let panelLatestVersion = '';
     let panelCurrentVersion = '';
+    // 页面渲染时的面板版本；/api/status 报的版本和它不同，说明面板已升级而这个标签页还是旧 JS
+    const PAGE_PANEL_VERSION = (document.querySelector('meta[name="mosctl-version"]') || {}).content || '';
+    const TOAST_DEFAULT_MS = 5200;
+    const SYNC_RESULT_TOAST_MS = 10000;
 
     // 后端只给 epoch 秒或带时区的 ISO-8601，这里按浏览器本地时区显示
     function formatTime(value) {
@@ -1391,7 +1450,9 @@
           const message = (data && data.message) || ('请求失败（HTTP ' + res.status + '）');
           throw new Error(message);
         }
-        return data || {};
+        // 旧版/未知后端可能回非对象（数组、字符串、null）：一律当空对象，调用方按缺字段处理
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+        return data;
       } catch (error) {
         if (options?.silent) {
           console.debug('Silent API request failed', url, error);
@@ -1410,18 +1471,29 @@
     function setBusy(value, message) {
       busy = value;
       document.querySelectorAll('button').forEach(button => {
-        if (!button.classList.contains('version-popover-refresh')) button.disabled = value;
+        if (!button.classList.contains('version-popover-refresh') && !button.classList.contains('stale-refresh')) button.disabled = value;
       });
       if (message) toast('处理中', message);
     }
 
-    function toast(title, body) {
+    function toast(title, body, durationMs) {
       $('toastTitle').textContent = title || '';
       $('toastCountdown').textContent = '';
       $('toastBody').textContent = body || '';
       $('toast').classList.add('show');
       clearTimeout(window.toastTimer);
-      window.toastTimer = setTimeout(() => $('toast').classList.remove('show'), 5200);
+      window.toastTimer = setTimeout(() => $('toast').classList.remove('show'), durationMs || TOAST_DEFAULT_MS);
+    }
+
+    function checkPanelVersion(serverVersion) {
+      // 只在双方都有版本号且不同时提示；旧后端没有 panel_version 字段时不误报
+      if (typeof serverVersion !== 'string' || !serverVersion || !PAGE_PANEL_VERSION) return;
+      if (serverVersion === PAGE_PANEL_VERSION) {
+        $('staleBanner').hidden = true;
+        return;
+      }
+      $('staleBannerText').textContent = `面板已升级到 v${serverVersion}，当前页面是旧版本，请刷新`;
+      $('staleBanner').hidden = false;
     }
 
     function startReloadCountdown(message, maxSeconds) {
@@ -1465,6 +1537,7 @@
 
     function showView(name) {
       if (!viewMeta[name]) return;
+      if (name !== activeView) clearRuleSaveResult();
       activeView = name;
       document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(tab => {
@@ -1519,6 +1592,7 @@
       $('webPort').textContent = res.web_port || '--';
       $('versionLabel').textContent = 'v' + (res.panel_version || '--');
       panelCurrentVersion = res.panel_version || panelCurrentVersion;
+      checkPanelVersion(res.panel_version);
       renderMigrateCard(res);
       $('flowLocal').textContent = '国内：' + (res.local_dns || '--') + (res.local_dns_backup ? ' / ' + res.local_dns_backup : '');
       $('flowRemote').textContent = '国外：' + (res.remote_dns || '--');
@@ -1777,26 +1851,105 @@
       editor.focus();
     }
 
+    // 保存结果区：显示在规则编辑框下面，直到下一次保存或切换视图才清掉。
+    // ruleSaveSeq 每次保存/清空都加 1，旧的同步轮询发现序号变了就不再改这里。
+    let ruleSaveSeq = 0;
+
+    function renderRuleSaveResult(tone, head, sync) {
+      const box = $('ruleSaveResult');
+      if (!box) return;
+      box.classList.remove('ok', 'warn', 'error');
+      if (tone) box.classList.add(tone);
+      $('ruleSaveHead').textContent = head || '';
+      $('ruleSaveSync').textContent = sync || '';
+      box.hidden = false;
+    }
+
+    function clearRuleSaveResult() {
+      ruleSaveSeq += 1;
+      const box = $('ruleSaveResult');
+      if (!box) return;
+      box.hidden = true;
+      $('ruleSaveHead').textContent = '';
+      $('ruleSaveSync').textContent = '';
+    }
+
+    function formatSeconds(ms) {
+      const value = Number(ms);
+      return Number.isFinite(value) ? (value / 1000).toFixed(1) + 's' : '--';
+    }
+
+    function ruleSaveHeadline(res) {
+      if (res.unchanged) return '规则内容没有变化，未重启';
+      const timings = res.timings && typeof res.timings === 'object' ? res.timings : null;
+      if (!timings) return '已保存';
+      return `已保存（校验 ${formatSeconds(timings.validate_ms)}，重启 ${formatSeconds(timings.restart_ms)}）`;
+    }
+
+    // 保存仍是一个请求：等待期间按计时推进阶段文字（前 2 秒在校验，之后在重启），不显得卡住
+    function startRuleSaveStages() {
+      const started = Date.now();
+      const tick = () => {
+        const seconds = Math.floor((Date.now() - started) / 1000);
+        const stage = seconds < 2 ? '校验规则…' : '重启 mosdns…';
+        const text = stage + (seconds ? `（${seconds}s）` : '');
+        renderRuleSaveResult('', text, '');
+        toast('正在保存规则', text);
+      };
+      tick();
+      const timer = setInterval(tick, 1000);
+      return () => clearInterval(timer);
+    }
+
     async function saveRule() {
       if (busy) return;
-      setBusy(true, '正在保存规则...');
+      clearRuleSaveResult();
+      const seq = ruleSaveSeq;
+      setBusy(true);
+      const stopStages = startRuleSaveStages();
       try {
         const rule = $('ruleSelect').value;
-        const res = await api('/api/rules/' + encodeURIComponent(rule), {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({content: $('ruleContent').value})
-        });
-        if (res.success && res.sync_job) {
+        let res;
+        try {
+          res = await api('/api/rules/' + encodeURIComponent(rule), {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: $('ruleContent').value})
+          });
+        } catch (error) {
+          stopStages();
+          renderRuleSaveResult('error', '保存失败', error.message || String(error));
+          throw error;
+        }
+        stopStages();
+        if (!res.success) {
+          renderRuleSaveResult('error', '保存失败', res.message || '后端没有返回结果，请刷新页面后重试');
+          toast('保存失败', res.message || '');
+        } else if (res.sync_job) {
+          renderRuleSaveResult('ok', ruleSaveHeadline(res), '同步中…');
           toast('已保存，正在同步…', res.message || '');
-          // 不 await：按钮马上恢复，同步结果到了再单独提示
-          pollSyncJob(res.sync_job);
+          // 不 await：按钮马上恢复，同步进度写进结果区，结束时再单独提示
+          pollSyncJob(res.sync_job, job => {
+            if (seq !== ruleSaveSeq) return;
+            if (!job) {
+              renderRuleSaveResult('warn', ruleSaveHeadline(res), '同步结果未取回，可稍后在规则同步区域查看');
+            } else if (job.finished_at) {
+              const summary = summarizeSyncJob(job);
+              renderRuleSaveResult(summary.failedCount ? 'warn' : 'ok', ruleSaveHeadline(res), summary.text);
+            } else {
+              renderRuleSaveResult('ok', ruleSaveHeadline(res), `同步中 ${job.done || 0}/${job.total || 0}…`);
+            }
+          });
         } else {
-          toast(res.success ? '保存完成' : '保存失败', res.message || '');
+          // 没有同步任务时 message 里可能带"同步未启用/缺密钥"之类的说明，原样放到第二行
+          const extra = String(res.message || '').split('\n\n').slice(1).join('\n\n');
+          renderRuleSaveResult('ok', ruleSaveHeadline(res), extra);
+          toast('保存完成', res.message || '');
         }
         $('commandOutput').textContent = res.message || '';
         await loadStatus();
       } finally {
+        stopStages();
         setBusy(false);
       }
     }
@@ -1847,19 +2000,28 @@
         : head + `进行中 ${job.done || 0} / ${job.total || 0}`;
     }
 
-    async function pollSyncJob(jobId) {
+    // onUpdate(job)：每次取到进度都回调（未结束的 job、结束的 job，超时为 null），给规则保存结果区用
+    async function pollSyncJob(jobId, onUpdate) {
+      const report = job => {
+        if (typeof onUpdate !== 'function') return;
+        try { onUpdate(job); } catch (error) { console.debug('sync progress render failed', error); }
+      };
       const deadline = Date.now() + SYNC_POLL_DEADLINE_MS;
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, SYNC_POLL_INTERVAL_MS));
         const job = await fetchSyncJob(jobId);
         if (job && job.finished_at) {
           const summary = summarizeSyncJob(job);
-          toast(summary.failedCount ? '同步部分失败' : '同步完成', summary.text);
+          // 同步结果这条提示多停留一会（10 秒），其他提示仍用默认时长
+          toast(summary.failedCount ? '同步部分失败' : '同步完成', summary.text, SYNC_RESULT_TOAST_MS);
           renderSyncJobSummary(job);
+          report(job);
           return job;
         }
+        if (job) report(job);
       }
-      toast('同步结果未取回', '同步结果未取回，可稍后在规则同步区域查看');
+      toast('同步结果未取回', '同步结果未取回，可稍后在规则同步区域查看', SYNC_RESULT_TOAST_MS);
+      report(null);
       return null;
     }
 
@@ -2048,6 +2210,7 @@
     let autoUpdateInfo = null;
     let autoUpdatePollTimer = null;
     let autoUpdatePollUntil = 0;
+    let autoUpdateSummary = '';
 
     // 服务器时间 HH:MM → 浏览器本地时间：先按服务器 UTC 偏移换成 UTC，再按浏览器偏移换回本地
     function serverTimeToBrowserLocal(value, serverOffset) {
@@ -2067,14 +2230,101 @@
         + '；' + (value || '--:--') + ' 相当于浏览器本地 ' + serverTimeToBrowserLocal(value, info.server_utc_offset);
     }
 
-    function describeAutoUpdateItem(item) {
+    // 版本号比较："v5.3.4" / "0.3.40" 都可以；无法识别时返回 null
+    function compareAutoUpdateVersions(a, b) {
+      const parse = v => {
+        const m = /^v?(\d+(?:\.\d+)*)/i.exec(String(v || '').trim());
+        return m ? m[1].split('.').map(Number) : null;
+      };
+      const pa = parse(a), pb = parse(b);
+      if (!pa || !pb) return null;
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const diff = (pa[i] || 0) - (pb[i] || 0);
+        if (diff) return diff > 0 ? 1 : -1;
+      }
+      return 0;
+    }
+
+    // 纯函数：根据自动更新状态 + 实际运行版本，算出表格一行要显示的内容（不碰 DOM，便于测试）
+    // item: state.core / state.panel；liveCurrent: core_current / panel_current；minAgeDays: 设置里的天数；nowSec: 当前 epoch 秒
+    function describeAutoUpdateItem(item, liveCurrent, minAgeDays, nowSec) {
       const data = item || {};
-      let text = '上次结果：' + (AUTO_UPDATE_RESULT_LABELS[data.last_result] || '还没有记录');
-      if (data.last_result_at) text += '（' + formatTime(data.last_result_at) + '）';
-      if (data.from && data.to && data.from !== data.to) text += ' ' + data.from + ' → ' + data.to;
-      if (data.message) text += '\n' + data.message;
-      if (data.last_check) text += '\n上次检查：' + formatTime(data.last_check) + (data.note ? '，' + data.note : '');
-      return text;
+      const withV = v => { const t = String(v || '').trim(); return t ? 'v' + t.replace(/^v/i, '') : ''; };
+      const current = withV(liveCurrent) || withV(data.current);
+      const recorded = withV(data.current);
+      const eligible = withV(data.latest_eligible);
+      const latest = withV(data.latest);
+      // 上次检查时记录的版本和现在实际运行的不同：说明检查之后手动升级过，那次检查的结论已过时
+      const manual = !!(recorded && current && compareAutoUpdateVersions(current, recorded) !== 0);
+      let status = '';
+      let warn = false;
+      if (eligible && compareAutoUpdateVersions(eligible, current) > 0) {
+        status = '可更新到 ' + eligible;
+        warn = true;
+      } else if (latest && compareAutoUpdateVersions(latest, current) > 0) {
+        const days = Math.max(0, Number(minAgeDays) || 0);
+        if (days > 0) {
+          status = latest + ' 已发布，满 ' + days + ' 天后自动更新';
+          const published = Number(data.latest_published_at) || 0;
+          if (published && nowSec) {
+            const left = Math.ceil((published + days * 86400 - nowSec) / 86400);
+            if (left > 0) status += '（还差 ' + left + ' 天）';
+          }
+        } else {
+          status = latest + ' 已发布，下次检查时更新';
+        }
+      } else if (latest && compareAutoUpdateVersions(current, latest) >= 0) {
+        status = '已是最新';
+      }
+      if (manual) status = (status || '') + '（上次检查后已手动升级）';
+      const checkOnly = data.last_check && (!data.last_result_at || data.last_check > data.last_result_at + 300);
+      let resultLabel = '还没有记录';
+      let resultTime = 0;
+      if (checkOnly) {
+        resultLabel = '已检查（未安装）';
+        resultTime = data.last_check;
+      } else if (data.last_result) {
+        resultLabel = AUTO_UPDATE_RESULT_LABELS[data.last_result] || data.last_result;
+        resultTime = data.last_result_at || data.last_check || 0;
+        if (data.from && data.to && data.from !== data.to) resultLabel += ' ' + withV(data.from) + ' → ' + withV(data.to);
+      } else if (data.last_check) {
+        resultLabel = '已检查';
+        resultTime = data.last_check;
+      }
+      // 详情只在能补充信息时显示：手动升级后旧结论不再显示；message 与 note 相同只显示一次；
+      // 状态行已经说明的 note 不重复（状态为空时才用 note 说明原因）
+      let detail = '';
+      if (!manual) {
+        const message = String(data.message || '').trim();
+        const note = String(data.note || '').trim();
+        if (checkOnly) detail = status ? '' : note;
+        else if (message && message !== note) detail = message;
+        else if (!status) detail = message || note;
+      }
+      return {current: current || '--', status, warn, resultLabel, resultTime, detail};
+    }
+
+    function renderAutoUpdateRow(versionCell, resultCell, view) {
+      const line = (text, cls) => {
+        const div = document.createElement('div');
+        div.className = cls;
+        div.textContent = text;
+        return div;
+      };
+      versionCell.replaceChildren(line(view.current, 'update-version'));
+      if (view.status) versionCell.appendChild(line(view.status, view.warn ? 'update-sub warn' : 'update-sub'));
+      resultCell.replaceChildren(line(view.resultLabel, ''));
+      if (view.resultTime) resultCell.appendChild(line(formatTime(view.resultTime), 'update-sub'));
+      if (view.detail) {
+        const detail = line(view.detail, 'update-sub');
+        detail.style.whiteSpace = 'pre-wrap';
+        resultCell.appendChild(detail);
+      }
+    }
+
+    function autoUpdateSummaryText(name, view) {
+      return name + '：' + view.current + (view.status ? '，' + view.status : '')
+        + '\n' + view.resultLabel + (view.detail ? '\n' + view.detail : '');
     }
 
     function renderAutoUpdate(res) {
@@ -2092,12 +2342,12 @@
       }
       renderAutoUpdateTimeNote();
       $('autoUpdateRunning').textContent = autoUpdateInfo.running ? '运行中' : (settings.enabled === false ? '已关闭' : '已开启');
-      $('autoUpdateCoreVersions').textContent = '当前：' + (autoUpdateInfo.core_current || '--')
-        + '，可更新到：' + (core.latest_eligible || '无') + (core.latest ? '，最新稳定版：' + core.latest : '');
-      $('autoUpdatePanelVersions').textContent = '当前：v' + (autoUpdateInfo.panel_current || '--')
-        + '，可更新到：' + (panel.latest_eligible || '无') + (panel.latest ? '，远端：' + panel.latest : '');
-      $('autoUpdateCoreResult').textContent = describeAutoUpdateItem(core);
-      $('autoUpdatePanelResult').textContent = describeAutoUpdateItem(panel);
+      const nowSec = Number(autoUpdateInfo.server_time) || Math.floor(Date.now() / 1000);
+      const coreView = describeAutoUpdateItem(core, autoUpdateInfo.core_current, settings.core_min_age_days ?? 3, nowSec);
+      const panelView = describeAutoUpdateItem(panel, autoUpdateInfo.panel_current, settings.panel_min_age_days ?? 0, nowSec);
+      renderAutoUpdateRow($('autoUpdateCoreVersions'), $('autoUpdateCoreResult'), coreView);
+      renderAutoUpdateRow($('autoUpdatePanelVersions'), $('autoUpdatePanelResult'), panelView);
+      autoUpdateSummary = autoUpdateSummaryText('MosDNS 内核', coreView) + '\n\n' + autoUpdateSummaryText('Mosctl 面板', panelView);
       const warnings = [];
       if (autoUpdateInfo.cron_available === false) warnings.push('系统没有 crontab 命令，自动更新不会执行，请先安装 cron。');
       if (autoUpdateInfo.cron_available !== false && autoUpdateInfo.cron_service_active === false) warnings.push('cron 服务没有运行，自动更新不会执行。');
@@ -2184,7 +2434,7 @@
           clearInterval(autoUpdatePollTimer);
           autoUpdatePollTimer = null;
           await loadStatus();
-          toast('自动更新结束', $('autoUpdateCoreResult').textContent + '\n\n' + $('autoUpdatePanelResult').textContent);
+          toast('自动更新结束', autoUpdateSummary);
         }
       }, 3000);
     }

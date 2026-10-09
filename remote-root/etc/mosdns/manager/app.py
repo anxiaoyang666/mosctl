@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.40"
+PANEL_VERSION = "0.3.42"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -87,6 +87,11 @@ CORE_HEALTH_DOMAINS = ("www.baidu.com", "www.google.com")
 CORE_HEALTH_TIMEOUT = 20
 CORE_HEALTH_INTERVAL = 1.0
 CORE_HEALTH_DNS_SERVER = ("127.0.0.1", 53)
+# restart_mosdns 重启后的就绪检查：每 100ms 看一次，直到服务 active 且国内域名能解析，最多等 5 秒。
+# mosdns.service 的 ExecStartPost 不再阻塞 2 秒，"重启成功"必须由这里确认，回滚才有依据
+RESTART_READY_TIMEOUT = 5.0
+RESTART_READY_INTERVAL = 0.1
+RESTART_READY_DOMAIN = "www.baidu.com"
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCK_SECONDS = 60
 # 同一时间只允许一个会改写配置/重启服务的操作；.env 的读改写用单独的锁，
@@ -1076,10 +1081,43 @@ def normalize_upstream(value, default_scheme=None, default_port=None):
     return rest, None
 
 
+def wait_mosdns_ready(timeout=None, interval=None):
+    """重启后轮询：服务 active 且向 127.0.0.1:53 查国内域名有应答才算就绪。返回 (ok, 说明)。"""
+    timeout = RESTART_READY_TIMEOUT if timeout is None else timeout
+    interval = RESTART_READY_INTERVAL if interval is None else interval
+    deadline = time.monotonic() + timeout
+    while True:
+        if service_active():
+            # 单次查询最多等 0.5 秒：端口还没监听时 UDP 收不到拒绝，只能靠超时，太长会拖慢就绪判断
+            remaining = deadline - time.monotonic()
+            ok, detail = dns_query(RESTART_READY_DOMAIN, timeout=min(0.5, max(0.2, remaining)))
+            # 只要 mosdns 回了一个 DNS 响应（哪怕上游失败返回 SERVFAIL 或空应答）就算启动成功：
+            # 这里判断的是“本机 mosdns 起来了”，不能因为国内上游一时故障就把正常的保存误判失败并回滚。
+            # 内核自动更新的健康检查仍要求真实解析成功（core_health_check）。
+            if ok or "RCODE=" in detail or "没有应答记录" in detail:
+                return True, detail
+            problem = "DNS 查询失败：" + detail
+        else:
+            problem = "mosdns 服务不是 active"
+        if time.monotonic() >= deadline:
+            return False, problem
+        time.sleep(interval)
+
+
 def restart_mosdns():
+    """重启 mosdns 并等它真正能解析。返回 (ok, 说明)，成功时说明里带实测耗时。"""
     # 先清掉 start-limit 计数：连续几次启动失败后 systemd 会拒绝再启动，回滚也会被挡住
     run_cmd(["systemctl", "reset-failed", "mosdns"], timeout=10)
-    return run_cmd(["systemctl", "restart", "mosdns"], timeout=30)
+    started = time.monotonic()
+    ok, output = run_cmd(["systemctl", "restart", "mosdns"], timeout=30)
+    if not ok:
+        return False, output
+    ready, detail = wait_mosdns_ready()
+    elapsed = time.monotonic() - started
+    prefix = output.strip() + "\n" if output and output.strip() else ""
+    if not ready:
+        return False, f"{prefix}mosdns 重启后 {RESTART_READY_TIMEOUT:g} 秒内未就绪：{detail}"
+    return True, f"{prefix}mosdns 已重启并能正常解析（耗时 {elapsed:.1f}s）"
 
 
 def tail_lines(text, count=15):
@@ -1161,7 +1199,7 @@ def config_starts(path, wait_seconds=3.0, binary=None):
             if port_open(api_port):
                 api_ready = True
                 break
-            time.sleep(0.2)
+            time.sleep(0.1)
         if proc.poll() is not None:
             stdout, stderr = proc.communicate()
             return False, tail_lines(clean_output(stdout + stderr)) or "mosdns 校验进程异常退出"
@@ -3113,6 +3151,10 @@ def rule_content_unchanged(rule_id, content):
     return rule_entry_set(current) == rule_entry_set(content)
 
 
+def elapsed_ms(started):
+    return max(0, int(round((time.monotonic() - started) * 1000)))
+
+
 def save_rule_content(rule_id, content):
     # 返回 (ok, message, (备份路径, 规则路径))，第三项给 restart_or_rollback 用。
     # 先查格式、再用沙箱 mosdns 校验，都通过才写文件；线上服务在这之前不会被碰
@@ -3621,7 +3663,8 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    return render_template("index.html", rule_files=RULE_FILES)
+    # 页面里嵌入自己的版本号：面板升级后旧标签页靠 /api/status 的 panel_version 发现自己过期
+    return render_template("index.html", rule_files=RULE_FILES, panel_version=PANEL_VERSION)
 
 
 @app.route("/api/status")
@@ -3910,14 +3953,21 @@ def api_rules(rule_id):
         )
 
     content = json_body().get("content", "")
-    if rule_content_unchanged(rule_id, content):
+    # 仍是一个同步请求；timings 让前端显示"校验 x.xs，重启 y.ys"（校验含格式检查、沙箱启动和写文件）
+    timings = {"validate_ms": 0, "restart_ms": 0}
+    unchanged = rule_content_unchanged(rule_id, content)
+    if unchanged:
         # 内容等价：不写文件、不备份、不跑沙箱、不重启；但仍推送给其他节点（它们可能还是旧的，已一致的会自己跳过）
         ok, message = True, RULES_UNCHANGED_MESSAGE
     else:
+        started = time.monotonic()
         saved, save_message, rollback = save_rule_content(rule_id, content)
+        timings["validate_ms"] = elapsed_ms(started)
         if not saved:
-            return jsonify({"success": False, "message": save_message})
+            return jsonify({"success": False, "message": save_message, "sync_job": None, "unchanged": False, "timings": timings})
+        started = time.monotonic()
         result = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
+        timings["restart_ms"] = elapsed_ms(started)
         ok, message = notify_if_rolled_back(f"{meta['label']}规则修改已回滚", result)
     sync_job = None
     if ok and rule_id in SYNCABLE_RULE_IDS:
@@ -3927,7 +3977,7 @@ def api_rules(rule_id):
             message = message + "；" + sync_message
         elif sync_message:
             message = message + "\n\n" + sync_message
-    return jsonify({"success": ok, "message": message, "sync_job": sync_job})
+    return jsonify({"success": ok, "message": message, "sync_job": sync_job, "unchanged": unchanged, "timings": timings})
 
 
 @app.route("/api/rule-sync-jobs/<job_id>")

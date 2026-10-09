@@ -383,8 +383,10 @@ class AppLogicTest(unittest.TestCase):
     def test_restart_resets_failed_state_first_and_tail_lines_trims(self):
         commands = []
         self.app.run_cmd = lambda args, timeout=60: commands.append(args) or (True, "")
-        self.app.restart_mosdns()
-        self.assertEqual(commands, [["systemctl", "reset-failed", "mosdns"], ["systemctl", "restart", "mosdns"]])
+        self.app.dns_query = lambda name, server=None, timeout=2.0: (True, name)
+        ok, _ = self.app.restart_mosdns()
+        self.assertTrue(ok)
+        self.assertEqual(commands[:2], [["systemctl", "reset-failed", "mosdns"], ["systemctl", "restart", "mosdns"]])
         self.assertEqual(self.app.tail_lines("\n".join(str(i) for i in range(40)), 15), "\n".join(str(i) for i in range(25, 40)))
 
     def test_flush_cache_uses_api_then_falls_back_to_dump_and_restart(self):

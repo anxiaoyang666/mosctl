@@ -9,8 +9,10 @@ OnFailure=mosdns-rescue.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/mosdns start -d /etc/mosdns
-# 启动成功后再关闭救援模式；放在 ExecStartPre 会在崩溃循环里每 3 秒拆一次救援规则
-ExecStartPost=-/bin/sh -c 'sleep 2; /usr/local/bin/mosctl rescue disable silent'
+# 启动成功后再关闭救援模式；放在 ExecStartPre 会在崩溃循环里每 3 秒拆一次救援规则。
+# 放到后台执行，不再让 systemctl restart 白等 2 秒：后台子进程留在本服务的 cgroup 里，
+# 2 秒内 mosdns 崩溃/被停止时整个 cgroup 会被 systemd 杀掉，救援规则不会被误拆。
+ExecStartPost=-/bin/sh -c '(sleep 2; /usr/local/bin/mosctl rescue disable silent) >/dev/null 2>&1 &'
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535

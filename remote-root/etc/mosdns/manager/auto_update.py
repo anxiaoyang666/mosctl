@@ -100,12 +100,20 @@ def plan_core(settings, now=None):
         release=release,
         latest=newest["tag"] if newest else "",
         latest_eligible=release["tag"] if release else "",
+        latest_published_at=newest.get("published_at") if newest else None,
     )
     return plan
 
 
 def run_core(plan, dry_run):
-    record_check("core", current=plan["current"], latest=plan["latest"], latest_eligible=plan["latest_eligible"], note=plan["note"])
+    record_check(
+        "core",
+        current=plan["current"],
+        latest=plan["latest"],
+        latest_eligible=plan["latest_eligible"],
+        latest_published_at=plan.get("latest_published_at"),
+        note=plan["note"],
+    )
     if dry_run:
         return plan["action"], plan["note"]
     if plan["action"] != "update":
@@ -153,6 +161,7 @@ def plan_panel(settings, now=None):
         if not commit.get("success"):
             # 要判断天数却拿不到提交时间：跳过，不能当作"满足条件"
             return dict(plan, action="skipped", note=commit.get("message", "GitHub 提交接口不可用") + "，无法判断提交天数，跳过")
+        plan["latest_published_at"] = commit["committed_at"]
         age_days = (now - commit["committed_at"]) / 86400
         if age_days < min_age:
             return dict(
@@ -166,7 +175,14 @@ def plan_panel(settings, now=None):
 
 
 def run_panel(plan, dry_run):
-    record_check("panel", current=plan["current"], latest=plan["latest"], latest_eligible=plan["latest_eligible"], note=plan["note"])
+    record_check(
+        "panel",
+        current=plan["current"],
+        latest=plan["latest"],
+        latest_eligible=plan["latest_eligible"],
+        latest_published_at=plan.get("latest_published_at"),
+        note=plan["note"],
+    )
     if dry_run:
         return plan["action"], plan["note"]
     if plan["action"] != "update":

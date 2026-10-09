@@ -10,8 +10,10 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -138,6 +140,14 @@ class ReleaseSelectionTest(Base):
         plan = self.auto.plan_core(self.app.read_auto_update_settings(), now=NOW)
         self.assertEqual(plan["action"], "skipped")
 
+    def test_plan_core_records_newest_publish_time(self):
+        self.fake_releases([release("v5.3.5", 1), release("v5.3.4", 10)])
+        self.app.get_version = lambda: "v5.3.4"
+        self.app.mosdns_asset_name = lambda: "mosdns-linux-amd64.zip"
+        plan = self.auto.plan_core(self.app.read_auto_update_settings(), now=NOW)
+        self.assertEqual((plan["latest"], plan["latest_eligible"]), ("v5.3.5", ""))
+        self.assertEqual(plan["latest_published_at"], NOW - DAY)
+
     def test_release_api_goes_direct_before_proxy(self):
         urls_seen = []
         self.app.read_url_text = lambda urls, timeout=15: urls_seen.extend(urls) or (False, "x", "")
@@ -182,6 +192,8 @@ class CoreInstallTest(Base):
         app.service_active = lambda: True
         app.CORE_HEALTH_TIMEOUT = 0
         app.CORE_HEALTH_INTERVAL = 0
+        app.RESTART_READY_TIMEOUT = 0
+        app.RESTART_READY_INTERVAL = 0
         app.cleanup_old_backups = lambda *a, **k: None
         self.sandbox_calls = []
         app.config_starts = lambda path, wait_seconds=3.0, binary=None: self.sandbox_calls.append(binary) or (True, "ok")
@@ -727,6 +739,94 @@ class ContractTest(unittest.TestCase):
         self.assertIn("startAutoUpdatePolling()", index)
         self.assertIn("loadAutoUpdate();", index)
 
+    def auto_update_card(self):
+        index = INDEX.read_text(encoding="utf-8")
+        start = index.index('<section class="panel" id="autoUpdateCard">')
+        return index[start:index.index("</section>", start)]
+
+    def test_ui_card_table_uses_theme_variables(self):
+        card = self.auto_update_card()
+        self.assertIn('class="update-table"', card)
+        self.assertIn("<th>项目</th><th>版本</th><th>上次检查</th>", card)
+        css = INDEX.read_text(encoding="utf-8")
+        rules = "\n".join(line for line in css.splitlines() if ".update-table" in line)
+        self.assertIn("var(--surface-soft)", rules)
+        self.assertIn("var(--line-soft)", rules)
+        for text in (card, rules):
+            self.assertNotRegex(text.lower(), r"background[^;\"]*(#fff\b|#ffffff|white)")
+
+    def test_ui_card_labels_are_plain(self):
+        card = self.auto_update_card()
+        self.assertIn("内核发布满几天才更新", card)
+        self.assertIn("面板发布满几天才更新", card)
+        self.assertIn("新版面板发布后等几天再更新，0 表示有新版就更新", card)
+        for jargon in ("remote-root", "提交", "分支"):
+            self.assertNotIn(jargon, card)
+
+    def run_describe_cases(self, cases):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node 不可用")
+        index = INDEX.read_text(encoding="utf-8")
+        pieces = []
+        for pattern in (
+            r"(?ms)^    const AUTO_UPDATE_RESULT_LABELS = \{.*?^    \};\n",
+            r"(?ms)^    function compareAutoUpdateVersions\(.*?^    \}\n",
+            r"(?ms)^    function describeAutoUpdateItem\(.*?^    \}\n",
+        ):
+            match = re.search(pattern, index)
+            self.assertIsNotNone(match, pattern)
+            pieces.append(match.group(0))
+        script = "\n".join(pieces) + (
+            "\nconst cases = JSON.parse(process.argv[1]);"
+            "\nprocess.stdout.write(JSON.stringify(cases.map(c => describeAutoUpdateItem(c[0], c[1], c[2], c[3]))));\n"
+        )
+        out = subprocess.run([node, "-e", script, json.dumps(cases)], capture_output=True, text=True, check=True).stdout
+        return json.loads(out)
+
+    def test_describe_auto_update_item_cases(self):
+        now = 1_800_000_000
+        core_state = {"current": "v5.3.4", "from": "v5.3.4", "to": "v5.3.4", "latest": "v5.3.4", "latest_eligible": "",
+                      "last_result": "up_to_date", "last_result_at": now - 60, "last_check": now - 60,
+                      "message": "当前 v5.3.4 已是最新稳定版", "note": "当前 v5.3.4 已是最新稳定版"}
+        panel_state = {"current": "v0.3.38", "from": "v0.3.38", "to": "v0.3.38", "latest": "v0.3.38", "latest_eligible": "",
+                       "last_result": "up_to_date", "last_result_at": now - 60, "last_check": now - 60,
+                       "message": "当前 v0.3.38 已是最新（远端 v0.3.38）", "note": "当前 v0.3.38 已是最新（远端 v0.3.38）"}
+        eligible = dict(core_state, current="v5.3.3", latest="v5.3.5", latest_eligible="v5.3.5", last_result="skipped",
+                        message="x", note="x")
+        waiting = dict(core_state, latest="v5.3.5", latest_published_at=now - 86400, last_result="skipped",
+                       message="v5.3.5 发布 1.0 天，未满 3 天", note="v5.3.5 发布 1.0 天，未满 3 天")
+        failed = dict(core_state, current="v5.3.3", latest="v5.3.4", latest_eligible="v5.3.4", last_result="failed",
+                      **{"from": "v5.3.3", "to": "v5.3.4"}, message="下载失败", note="可更新到 v5.3.4")
+        views = self.run_describe_cases([
+            [core_state, "v5.3.4", 3, now],
+            [panel_state, "0.3.40", 0, now],
+            [eligible, "v5.3.3", 3, now],
+            [waiting, "v5.3.4", 3, now],
+            [dict(waiting, latest_published_at=None), "v5.3.4", 3, now],
+            [failed, "v5.3.3", 3, now],
+            [{}, "v5.3.4", 3, now],
+        ])
+        # 已是最新：message 与 note 相同，不重复显示
+        self.assertEqual((views[0]["current"], views[0]["status"], views[0]["warn"], views[0]["detail"]), ("v5.3.4", "已是最新", False, ""))
+        self.assertEqual(views[0]["resultLabel"], "已是最新")
+        # 检查后手动升级：显示实际版本，标注手动升级，不再显示过时的"当前 v0.3.38 / 远端 v0.3.38"
+        self.assertEqual(views[1]["current"], "v0.3.40")
+        self.assertEqual(views[1]["status"], "已是最新（上次检查后已手动升级）")
+        self.assertEqual(views[1]["detail"], "")
+        self.assertNotIn("v0.3.38", json.dumps(views[1], ensure_ascii=False))
+        # 有可用新版：警告样式
+        self.assertEqual((views[2]["status"], views[2]["warn"]), ("可更新到 v5.3.5", True))
+        # 新版已发布但未满天数：给出剩余天数；没有发布时间时不写剩余天数
+        self.assertEqual(views[3]["status"], "v5.3.5 已发布，满 3 天后自动更新（还差 2 天）")
+        self.assertEqual(views[3]["detail"], "")
+        self.assertEqual(views[4]["status"], "v5.3.5 已发布，满 3 天后自动更新")
+        # 失败：结果带版本变化，message 与 note 不同才显示
+        self.assertEqual(views[5]["resultLabel"], "失败 v5.3.3 → v5.3.4")
+        self.assertEqual(views[5]["detail"], "下载失败")
+        # 没有任何记录
+        self.assertEqual((views[6]["current"], views[6]["status"], views[6]["resultLabel"]), ("v5.3.4", "", "还没有记录"))
+
     def test_uninstall_logrotate_and_installer(self):
         cli = CLI.read_text(encoding="utf-8")
         self.assertIn('grep -v "MOSCTL_AUTO_UPDATE"', cli)
@@ -737,7 +837,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, install)
 
     def test_panel_version(self):
-        self.assertIn('PANEL_VERSION = "0.3.40"', APP.read_text(encoding="utf-8"))
+        self.assertIn('PANEL_VERSION = "0.3.42"', APP.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

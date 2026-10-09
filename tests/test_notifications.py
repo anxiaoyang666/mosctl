@@ -303,6 +303,8 @@ class EventHookTest(Base):
         self.assertEqual(calls[1][1], ("rule_sync", "规则同步已恢复", ["其他面板推送的规则已正常应用"]))
         source = APP.read_text(encoding="utf-8")
         self.assertIn('ok, message = apply_synced_rules(data.get("rules"))\n    notify_rule_sync_receive(ok, message, client_address())', source)
+        # 连通性测试（空规则）直接回成功，不进入告警
+        self.assertIn('if data.get("rules") == {}:\n        # 对端面板的「测试连通性」只发空规则：密钥已通过就算成功，不当作同步失败去告警\n        return jsonify({"success": True, "message": SYNC_PING_MESSAGE})', source)
 
     def test_routes(self):
         source = APP.read_text(encoding="utf-8")

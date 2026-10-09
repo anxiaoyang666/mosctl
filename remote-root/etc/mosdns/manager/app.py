@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.42"
+PANEL_VERSION = "0.3.43"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -3333,6 +3333,9 @@ def start_broadcast(rule_id, content):
     return job["id"], f"正在后台同步到 {len(remote_peers)} 个节点…"
 
 
+SYNC_PING_MESSAGE = "接口可访问，密钥已通过"
+
+
 def apply_synced_rules(rules):
     if not isinstance(rules, dict):
         return False, "同步内容不合法"
@@ -3922,6 +3925,9 @@ def api_rule_sync():
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return jsonify({"success": False, "message": "请求体必须是 JSON 对象"}), 400
+    if data.get("rules") == {}:
+        # 对端面板的「测试连通性」只发空规则：密钥已通过就算成功，不当作同步失败去告警
+        return jsonify({"success": True, "message": SYNC_PING_MESSAGE})
     ok, message = apply_synced_rules(data.get("rules"))
     notify_rule_sync_receive(ok, message, client_address())
     return jsonify({"success": ok, "message": message})

@@ -88,12 +88,13 @@
       border: 1px solid var(--line); border-radius: 10px;
       background: var(--surface-2); color: var(--text);
       text-align: left; box-shadow: none;
+      line-height: 1.35;
     }
     .site-button:hover { border-color: var(--line-2); background: var(--surface-2); }
     .brand-mark { width: 30px; height: 30px; display: block; flex: 0 0 auto; border-radius: 8px; }
     .site-copy { min-width: 0; flex: 1; }
-    .site-copy strong { display: block; font-size: 14px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .site-copy small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .site-copy strong { display: block; line-height: 1.35; font-size: 14px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .site-copy small { display: block; margin-top: 1px; line-height: 1.35; color: var(--muted); font-size: 12px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .site-button .chev { color: var(--faint); font-size: 12px; }
     .site-menu {
       position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 50;
@@ -323,7 +324,9 @@
     .example-box { min-height: 0; max-height: none; margin-top: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
 
     /* ===== 事件流 ===== */
-    .incident-feed, .log-list { display: grid; gap: 0; max-height: 460px; overflow: auto; }
+    /* 启停和定时缓存保存已合并成一条，读多一些日志事件才不会太少；高度跟着屏幕走 */
+    .incident-feed, .log-list { display: grid; gap: 0; max-height: max(460px, calc(100vh - 420px)); overflow: auto; align-content: start; }
+    .command-output { min-height: 120px; max-height: 360px; }
     .log-card { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; align-items: start; padding: 10px 4px; border-top: 1px solid var(--line); }
     .log-card:first-child { border-top: 0; }
     .log-level {
@@ -464,7 +467,7 @@
 
       <nav class="nav" aria-label="主导航">
         <button type="button" class="tab active" data-view="overview" aria-current="page" onclick="showView('overview')"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>态势总览</button>
-        <button type="button" class="tab" data-view="policy" onclick="showView('policy')"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2v12M8 6l4-3M8 9L4 6"/></svg>解析策略</button>
+        <button type="button" class="tab" data-view="policy" onclick="showView('policy')"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8h4l3-4.5h4M9.5 12.5h4M6.5 8l3 4.5"/><path d="M11.5 1.8l2 1.7-2 1.7M11.5 10.8l2 1.7-2 1.7"/></svg>解析策略</button>
         <button type="button" class="tab" data-view="operations" onclick="showView('operations')"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 8a5.5 5.5 0 0 1 9.4-3.9M13.5 8a5.5 5.5 0 0 1-9.4 3.9M12 1.8V4.3H9.5M4 14.2V11.7h2.5"/></svg>运行维护</button>
         <button type="button" class="tab" data-view="advanced" onclick="showView('advanced')"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 4h10M3 8h10M3 12h6"/><circle cx="11.5" cy="12" r="1.5"/></svg>高级配置</button>
         <button type="button" class="tab" data-view="control" onclick="showView('control')"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2v6"/><path d="M4.5 4.5a5 5 0 1 0 7 0"/></svg>系统控制</button>
@@ -594,10 +597,10 @@
                   <h3>事件流</h3>
                   <div class="panel-note">日志被解释为可读事件，保留原始详情。</div>
                 </div>
-                <select id="logLines" onchange="loadDashboardLogs()" style="width: 120px;">
-                  <option value="80">最近 80 行</option>
-                  <option value="160">最近 160 行</option>
+                <select id="logLines" onchange="loadDashboardLogs()" style="width: 140px;">
                   <option value="400">最近 400 行</option>
+                  <option value="1000">最近 1000 行</option>
+                  <option value="3000">最近 3000 行</option>
                 </select>
               </div>
               <div class="incident-feed" id="dashboardLogs">
@@ -637,7 +640,7 @@
                   <div class="panel-note">操作结果会显示在这里。</div>
                 </div>
               </div>
-              <pre id="commandOutput">等待操作</pre>
+              <pre id="commandOutput" class="command-output">等待操作</pre>
             </section>
           </aside>
         </div>
@@ -2365,7 +2368,7 @@
     async function loadDashboardLogs() {
       const target = $('dashboardLogs');
       if (!target) return;
-      const lines = $('logLines') ? $('logLines').value : '80';
+      const lines = $('logLines') ? $('logLines').value : '400';
       const res = await api('/api/logs?lines=' + encodeURIComponent(lines), {silent: true});
       if (!Object.keys(res || {}).length) return;
       renderDashboardLogs(res.entries || [], res.logs || '');

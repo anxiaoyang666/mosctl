@@ -78,10 +78,10 @@ class ConsoleRedesignContractTest(unittest.TestCase):
     def test_login_page_matches_console_direction(self):
         text = login_source()
 
-        self.assertIn("control-room", text)
-        self.assertIn("Mosctl 控制台", text)
-        self.assertIn("DNS 运维入口", text)
-        self.assertIn("status-strip", text)
+        # 与 mihomo 面板同一套登录页：站点名作标题，配色跟随主题
+        self.assertIn('class="login-card"', text)
+        self.assertIn('{{ site_name or "Mosctl" }}', text)
+        self.assertIn("localStorage.getItem('theme')", text)
 
 
 if __name__ == "__main__":

@@ -150,36 +150,21 @@ class PanelUpgradeContractTest(unittest.TestCase):
         self.assertIn("'v' + (res.current_version || '--') + ' 可更新'", text)
 
 
-    def test_sidebar_brand_uses_reference_style_version_badge(self):
+    def test_sidebar_has_site_switcher_and_version_badge(self):
+        # 与 mihomo 面板同一套侧边栏：站点切换在上，版本号和主题切换在底部
         text = index_source()
 
-        self.assertIn(".brand-copy", text)
-        self.assertIn("width: 40px;", text)
-        self.assertIn("height: 40px;", text)
-        self.assertIn("font-size: 22px;", text)
-        self.assertIn("font-size: 13px;", text)
-        self.assertIn("min-height: 46px;", text)
-        self.assertIn("width: 280px;", text)
-        self.assertIn("left: 72px;", text)
-        self.assertIn("top: 70px;", text)
-        self.assertNotIn("width: 64px;", text)
-        self.assertNotIn("width: 48px;", text)
-        self.assertNotIn("font-size: 31px;", text)
-        self.assertIn("border-radius: 999px;", text)
-        self.assertIn("background: #f2f4f7;", text)
-        self.assertIn('class="brand-copy"', text)
+        self.assertIn('id="siteButton"', text)
+        self.assertIn('id="siteMenu"', text)
+        self.assertIn("function loadSiteMenu", text)
+        self.assertIn('class="brand-version" id="versionText"', text)
+        self.assertIn('data-theme-choice="auto"', text)
+        self.assertIn("function setTheme", text)
 
-    def test_sidebar_version_brand_is_subtle_and_update_state_is_amber(self):
+    def test_sidebar_version_badge_update_state_is_amber(self):
         text = index_source()
 
-        self.assertIn("font-weight: 650;", text)
-        self.assertIn("font-weight: 500;", text)
-        self.assertIn("font-weight: 680;", text)
-        self.assertNotIn("font-weight: 780;", text)
-        self.assertNotIn("font-weight: 760;", text)
-        self.assertNotIn("font-weight: 900;", text)
-        self.assertIn("background: #fffbeb;", text)
-        self.assertIn("color: #b45309;", text)
+        self.assertIn(".brand-version.has-update { color: var(--warning);", text)
         self.assertIn("version-dot", text)
         self.assertIn("@keyframes versionPulse", text)
         self.assertIn("animation: versionPulse 1.6s ease-in-out infinite;", text)

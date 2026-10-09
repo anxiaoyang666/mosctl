@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.45"
+PANEL_VERSION = "0.3.46"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -3748,7 +3748,7 @@ def login():
         address = client_address()
         locked = login_locked_seconds(address)
         if locked:
-            return render_template("login.html", error=f"失败次数过多，请 {locked} 秒后再试"), 429
+            return render_template("login.html", error=f"失败次数过多，请 {locked} 秒后再试", site_name=read_env().get("SITE_NAME", "")), 429
         env = read_env()
         username = request.form.get("username", "")
         password = request.form.get("password", "")
@@ -3763,10 +3763,10 @@ def login():
             session.permanent = True
             return redirect("/")
         record_login_failure(address)
-        return render_template("login.html", error="用户名或密码错误"), 401
+        return render_template("login.html", error="用户名或密码错误", site_name=read_env().get("SITE_NAME", "")), 401
     if session.get("logged_in"):
         return redirect("/")
-    return render_template("login.html")
+    return render_template("login.html", site_name=read_env().get("SITE_NAME", ""))
 
 
 @app.route("/logout", methods=["POST"])
@@ -3779,7 +3779,15 @@ def logout():
 @login_required
 def index():
     # 页面里嵌入自己的版本号：面板升级后旧标签页靠 /api/status 的 panel_version 发现自己过期
-    return render_template("index.html", rule_files=RULE_FILES, panel_version=PANEL_VERSION)
+    return render_template("index.html", rule_files=RULE_FILES, panel_version=PANEL_VERSION, site_name=read_env().get("SITE_NAME", ""))
+
+
+@app.route("/api/site-info")
+def api_site_info():
+    """不需要登录：只给其他站点面板的“站点切换”菜单显示名字用，不含任何其他信息。"""
+    resp = jsonify({"site_name": read_env().get("SITE_NAME", "")})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 
 @app.route("/api/status")

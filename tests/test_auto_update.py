@@ -750,8 +750,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn("<th>项目</th><th>版本</th><th>上次检查</th>", card)
         css = INDEX.read_text(encoding="utf-8")
         rules = "\n".join(line for line in css.splitlines() if ".update-table" in line)
-        self.assertIn("var(--surface-soft)", rules)
-        self.assertIn("var(--line-soft)", rules)
+        self.assertIn("var(--surface-2)", rules)
+        self.assertIn("var(--line)", rules)
         for text in (card, rules):
             self.assertNotRegex(text.lower(), r"background[^;\"]*(#fff\b|#ffffff|white)")
 
@@ -837,7 +837,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, install)
 
     def test_panel_version(self):
-        self.assertIn('PANEL_VERSION = "0.3.45"', APP.read_text(encoding="utf-8"))
+        self.assertIn('PANEL_VERSION = "0.3.46"', APP.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

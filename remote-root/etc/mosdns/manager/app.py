@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.43"
+PANEL_VERSION = "0.3.44"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -109,7 +109,7 @@ RULE_FILES = {
         "label": "强制国内",
         "path": f"{MOSDNS_DIR}/rules/force-cn.txt",
         "summary": "命中的域名强制走国内上游 DNS，适合国内站点被误判到国外时使用。",
-        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配）。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀。",
+        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配），可以用 # 写注释。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀；同步到 mihomo 时 keyword:/regexp: 不生效，full: 会连同子域名一起匹配。",
         "examples": [
             "# 这些域名强制走国内 DNS",
             "example.cn",
@@ -121,7 +121,7 @@ RULE_FILES = {
         "label": "强制国外",
         "path": f"{MOSDNS_DIR}/rules/force-nocn.txt",
         "summary": "命中的域名强制走国外上游 DNS，适合海外服务解析不准或被污染时使用。",
-        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配）。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀。",
+        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配），可以用 # 写注释。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀；同步到 mihomo 时 keyword:/regexp: 不生效，full: 会连同子域名一起匹配。",
         "examples": [
             "# 这些域名强制走国外 DNS",
             "openai.com",
@@ -281,11 +281,96 @@ def explain_log_line(line):
         entry["detail"] = f"{message} {payload_text}"
     else:
         entry["detail"] = message
+    entry["message"] = message
     return entry
 
 
+# 一次重启会写几十行“加载 / 关闭模块”，每小时还有一行“缓存已保存”，会把事件流里真正要看的内容挤掉。
+# 同一次启停（相邻且时间相差不超过几秒）合成一条，连续的定时缓存保存也合成一条。
+LIFECYCLE_LOG_MESSAGES = {
+    "loading plugin", "closing plugin", "all plugins are loaded", "all plugins were closed",
+    "starting api http server", "udp server started", "tcp server started", "cache dump loaded",
+    "cache dumped", "starting shutdown sequences", "signal received", "read err",
+}
+LIFECYCLE_GROUP_SECONDS = 5
+LOG_GROUP_DETAIL_LINES = 40
+
+
+def log_entry_epoch(entry):
+    try:
+        return datetime.fromisoformat(str(entry.get("time") or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def is_lifecycle_entry(entry):
+    message = entry.get("message")
+    if message == "read err":
+        return entry.get("kind") == "notice"  # 只有“连接被关闭”这种是启停时的正常现象
+    return message in LIFECYCLE_LOG_MESSAGES
+
+
+def summarize_lifecycle(group):
+    messages = [item.get("message") for item in group]
+    modules = messages.count("loading plugin")
+    started = "all plugins are loaded" in messages
+    stopped = "all plugins were closed" in messages or "signal received" in messages
+    if started and stopped:
+        summary = f"mosdns 已重启（重新加载 {modules} 个模块）"
+    elif started:
+        summary = f"mosdns 已启动（加载 {modules} 个模块）"
+    elif stopped:
+        summary = "mosdns 已停止"
+    else:
+        return None
+    details = [item.get("detail") or "" for item in group]
+    if len(details) > LOG_GROUP_DETAIL_LINES:
+        details = details[:LOG_GROUP_DETAIL_LINES] + [f"……共 {len(group)} 行"]
+    return {
+        "time": group[0].get("time", ""), "level": "INFO", "component": "", "summary": summary,
+        "detail": "\n".join(details), "raw": "\n".join(item.get("raw") or "" for item in group),
+        "kind": "info", "message": "lifecycle", "count": len(group),
+    }
+
+
+def group_log_entries(entries):
+    groups = []
+    for entry in entries:
+        last = groups[-1] if groups else None
+        if is_lifecycle_entry(entry):
+            if last and last["type"] == "life":
+                a, b = log_entry_epoch(last["items"][-1]), log_entry_epoch(entry)
+                if a is not None and b is not None and abs(a - b) <= LIFECYCLE_GROUP_SECONDS:
+                    last["items"].append(entry)
+                    continue
+            groups.append({"type": "life", "items": [entry]})
+        else:
+            groups.append({"type": "plain", "items": [entry]})
+    result = []
+    for group in groups:
+        merged = summarize_lifecycle(group["items"]) if group["type"] == "life" and len(group["items"]) > 1 else None
+        if merged:
+            result.append(merged)
+        else:
+            result.extend(group["items"])
+    # 连续的定时缓存保存合成一条
+    folded = []
+    for entry in result:
+        prev = folded[-1] if folded else None
+        if entry.get("message") == "cache dumped" and prev and prev.get("message") == "cache dumped":
+            prev["count"] = prev.get("count", 1) + 1
+            prev["summary"] = f"缓存已定期保存 {prev['count']} 次（{prev['_latest']}）"
+            continue
+        if entry.get("message") == "cache dumped":
+            entry = dict(entry, _latest=entry["summary"].replace("缓存已保存：", "最近一次 "))
+        folded.append(entry)
+    for entry in folded:
+        entry.pop("_latest", None)
+    return folded
+
+
 def parse_log_entries(text):
-    return [explain_log_line(line) for line in (text or "").splitlines() if line.strip()]
+    return group_log_entries([explain_log_line(line) for line in (text or "").splitlines() if line.strip()])
 
 
 def run_cmd(args, timeout=60):
@@ -2220,13 +2305,30 @@ def backup_file(path, prefix):
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
     backup_path = f"{BACKUP_DIR}/{prefix}.{stamp}.bak"
-    shutil.copy2(path, backup_path)
+    # 不用 copy2：它会把原文件的修改时间带过来，备份看起来比实际旧，清理时可能先删掉刚做的备份
+    shutil.copyfile(path, backup_path)
+    shutil.copymode(path, backup_path)
     cleanup_old_backups()
     return backup_path
 
 
 def rule_backup_prefix(rule_id):
     return f"{RULE_BACKUP_PREFIX}{rule_id}"
+
+
+BACKUP_STAMP_RE = re.compile(r"(?<!\d)(\d{14})(?!\d)")
+
+
+def backup_time(name, mtime):
+    """备份时间以文件名里的 YYYYmmddHHMMSS（服务器本地时间）为准；没有再用修改时间。
+    旧版用 copy2 做的备份，修改时间是被备份文件的，不是备份那一刻。"""
+    match = BACKUP_STAMP_RE.search(name)
+    if match:
+        try:
+            return int(time.mktime(time.strptime(match.group(1), "%Y%m%d%H%M%S")))
+        except (ValueError, OverflowError):
+            pass
+    return int(mtime)
 
 
 def list_backup_files(paths):
@@ -2243,7 +2345,7 @@ def list_backup_files(paths):
                 "id": os.path.basename(real_path),
                 "path": real_path,
                 "size": stat.st_size,
-                "mtime": int(stat.st_mtime),
+                "mtime": backup_time(os.path.basename(real_path), stat.st_mtime),
             }
         )
     items.sort(key=lambda item: item["mtime"], reverse=True)
@@ -2376,6 +2478,11 @@ def write_account_settings(data):
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     confirm = str(data.get("confirm") or "")
+    # 改账号必须先输入当前密码：登录状态被别人拿到（忘了退出、借用电脑）时也改不掉密码
+    current = str(data.get("current_password") or "")
+    valid_pass = read_env().get("WEB_SECRET", "")
+    if not valid_pass or not secrets.compare_digest(current.encode("utf-8"), valid_pass.encode("utf-8")):
+        return False, "当前密码不正确" if current else "请先输入当前密码"
     if not username:
         return False, "用户名不能为空"
     if not is_safe_text(username, 64) or any(char.isspace() for char in username) or env_value_error(username):
@@ -3853,9 +3960,9 @@ def api_rule_sync_test():
 @login_required
 def api_geo_schedule():
     if request.method == "GET":
-        return jsonify({**read_geo_schedule(), **geo_update_status()})
+        return jsonify({**read_geo_schedule(), **geo_update_status(), **server_time_info()})
     ok, message = write_geo_schedule(json_body())
-    return jsonify({"success": ok, "message": message, **read_geo_schedule(), **geo_update_status()})
+    return jsonify({"success": ok, "message": message, **read_geo_schedule(), **geo_update_status(), **server_time_info()})
 
 
 @app.route("/api/auto-update", methods=["GET", "POST"])
@@ -3882,6 +3989,36 @@ def api_auto_update_check():
 def api_auto_update_run():
     ok, message = start_auto_update_detached()
     return jsonify({"success": ok, "message": message, **auto_update_overview()})
+
+
+NOTIFY_LOG_LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (sent|failed) host=(\S*) (?:error=)?(.*?) title=(.*)$")
+
+
+def recent_notifications(limit=15, path=None):
+    """“最近通知”：解析 log_notify 写的日志，最新的在前。日志时间是服务器本地时间，换成 epoch 交给前端显示。"""
+    try:
+        with open(path or NOTIFY_LOG, "r", encoding="utf-8", errors="replace") as file:
+            lines = file.readlines()[-400:]
+    except OSError:
+        return []
+    items = []
+    for line in lines:
+        match = NOTIFY_LOG_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        stamp, state, host, detail, title = match.groups()
+        try:
+            at = int(time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
+        except (ValueError, OverflowError):
+            continue
+        items.append({"at": at, "ok": state == "sent", "host": host, "detail": detail[:200], "title": title[:200]})
+    return items[-limit:][::-1]
+
+
+@app.route("/api/notify-log")
+@login_required
+def api_notify_log():
+    return jsonify({"items": recent_notifications()})
 
 
 @app.route("/api/notify-settings", methods=["GET", "POST"])

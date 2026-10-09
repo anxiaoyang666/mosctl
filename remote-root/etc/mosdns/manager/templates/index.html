@@ -674,6 +674,13 @@
       overflow-wrap: anywhere;
     }
     .sync-test-status { font-size: 12px; font-weight: 850; white-space: nowrap; }
+    .notify-log { display: grid; gap: 6px; margin-top: 6px; }
+    .notify-log-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: baseline; padding: 7px 10px; border-radius: 8px; background: var(--soft, rgba(127,127,127,.08)); border-left: 3px solid #2f9e5b; font-size: 12px; }
+    .notify-log-row.failed { border-left-color: #d64545; }
+    .notify-log-row time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .notify-log-row .title { overflow-wrap: anywhere; }
+    .notify-log-row .err { display: block; color: #d64545; }
+    .notify-log-row .state { color: var(--muted); white-space: nowrap; }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -1197,7 +1204,7 @@
             <label class="check-row"><input id="autoUpdateEnabled" type="checkbox"> 启用自动更新</label>
             <div class="field-grid">
               <div class="field">
-                <div class="field-title">每天执行时间（服务器时间）</div>
+                <div class="field-title">每天执行时间</div>
                 <input id="autoUpdateTime" type="time" value="04:10" oninput="renderAutoUpdateTimeNote()">
                 <p class="hint" id="autoUpdateTimeNote" style="margin: 8px 0 0;">服务器时区：--</p>
               </div>
@@ -1269,6 +1276,8 @@
               <button type="button" onclick="sendTestNotification()">发送测试通知</button>
             </div>
             <div class="sync-test-message" id="notifyTestResult" style="white-space: pre-wrap;"></div>
+            <div class="field-title" style="margin-top: 16px;">最近通知</div>
+            <div class="notify-log" id="notifyLogList"><div class="sync-test-message">加载中…</div></div>
           </section>
         </div>
       </section>
@@ -1284,6 +1293,10 @@
               <button type="button" class="primary" onclick="saveAccountSettings()">保存登录信息</button>
             </div>
             <div class="field-grid">
+              <div class="field">
+                <label for="accountCurrentPassword">当前密码</label>
+                <input id="accountCurrentPassword" type="password" autocomplete="current-password" placeholder="修改前先输入当前密码">
+              </div>
               <div class="field">
                 <label for="accountUsername">用户名</label>
                 <input id="accountUsername" autocomplete="username">
@@ -1588,6 +1601,8 @@
       $('rescue').textContent = res.rescue ? '已接管' : '关闭';
       $('rescue').className = 'status-value ' + (res.rescue ? 'warn' : 'ok');
       $('version').textContent = res.version_clean || res.version || '--';
+      // 升级中心的“当前”不用等点检测，状态里就有
+      if ($('coreCurrent') && $('coreCurrent').textContent === '--') $('coreCurrent').textContent = res.version_clean || res.version || '--';
       $('panelVersion').textContent = 'v' + (res.panel_version || '--');
       $('webPort').textContent = res.web_port || '--';
       $('versionLabel').textContent = 'v' + (res.panel_version || '--');
@@ -1597,9 +1612,6 @@
       $('flowLocal').textContent = '国内：' + (res.local_dns || '--') + (res.local_dns_backup ? ' / ' + res.local_dns_backup : '');
       $('flowRemote').textContent = '国外：' + (res.remote_dns || '--');
       $('ttlPill').textContent = 'TTL ' + (res.ttl || '--');
-      if ($('geoServerTime')) {
-        $('geoServerTime').textContent = '服务器时区：' + (res.server_tz || '未知') + ' 当前 ' + formatServerClock(res.server_time, res.server_utc_offset) + '，计划按服务器时间执行';
-      }
       renderHealth(res.health);
     }
 
@@ -1774,6 +1786,7 @@
       $('accountUsername').value = res.username || '';
       $('accountPassword').value = '';
       $('accountPasswordConfirm').value = '';
+      $('accountCurrentPassword').value = '';
     }
 
     async function saveAccountSettings() {
@@ -1787,6 +1800,7 @@
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
+            current_password: $('accountCurrentPassword').value,
             username: $('accountUsername').value,
             password: $('accountPassword').value,
             confirm: $('accountPasswordConfirm').value
@@ -2146,12 +2160,30 @@
       $('geoScheduleWeekdayField').style.display = mode === 'weekly' ? '' : 'none';
     }
 
+    let geoServerOffset = 0;
+
+    function describeGeoScheduleLocal(mode, time, weekday) {
+      if (mode === 'disabled') return '已关闭自动更新';
+      if (mode === 'every_6h' || mode === 'every_12h') {
+        const step = mode === 'every_6h' ? 6 : 12;
+        const times = [];
+        for (let i = 0; i < 24; i += step) times.push(shiftClock(time, i * 60).time);
+        return '每 ' + step + ' 小时更新一次（' + times.sort().join('、') + '）';
+      }
+      if (mode === 'weekly') return '每' + ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][Number(weekday)] + ' ' + time + ' 更新';
+      return '每天 ' + time + ' 更新';
+    }
+
     async function loadGeoSchedule() {
       const res = await api('/api/geo-schedule');
+      geoServerOffset = res.server_utc_offset || 0;
+      const local = serverClockToLocal(res.time || '02:00', geoServerOffset);
+      const weekday = String((Number(res.weekday || '1') + local.days + 7) % 7);
       $('geoScheduleMode').value = res.mode && res.mode !== 'custom' ? res.mode : 'daily';
-      $('geoScheduleTime').value = res.time || '02:00';
-      $('geoScheduleWeekday').value = res.weekday || '1';
-      $('geoScheduleSummary').textContent = res.summary || '未设置自动更新';
+      $('geoScheduleTime').value = local.time;
+      $('geoScheduleWeekday').value = weekday;
+      $('geoServerTime').textContent = scheduleTzNote(res.server_tz, geoServerOffset);
+      $('geoScheduleSummary').textContent = res.mode === 'custom' ? (res.summary || '') : describeGeoScheduleLocal(res.mode || 'daily', local.time, weekday);
       renderGeoUpdateStatus(res);
       updateGeoScheduleFields();
     }
@@ -2179,6 +2211,12 @@
       $('geoFiles').textContent = (res.files || []).map(item => item.name + '：' + (item.mtime ? formatTime(item.mtime) + '，' + Math.max(1, Math.round(item.size / 1024)) + ' KB' : '不存在')).join('；');
     }
 
+    // 页面上的本地时间 → 服务器时间；跨天时星期一起挪
+    function geoServerSchedule() {
+      const server = localClockToServer($('geoScheduleTime').value, geoServerOffset);
+      return { time: server.time, weekday: String((Number($('geoScheduleWeekday').value) + server.days + 7) % 7) };
+    }
+
     async function saveGeoSchedule() {
       if (busy) return;
       setBusy(true, '正在保存 Geo 自动更新...');
@@ -2188,8 +2226,8 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             mode: $('geoScheduleMode').value,
-            time: $('geoScheduleTime').value,
-            weekday: $('geoScheduleWeekday').value
+            time: geoServerSchedule().time,
+            weekday: geoServerSchedule().weekday
           })
         });
         toast(res.success ? '保存完成' : '保存失败', res.message || '');
@@ -2212,6 +2250,30 @@
     let autoUpdatePollUntil = 0;
     let autoUpdateSummary = '';
 
+    // 定时任务按服务器时区执行（容器多为 UTC），页面上一律按浏览器本地时间填写和显示。
+    // 返回 {time, days}：days 是跨过的天数（-1/0/1），每周计划要跟着挪星期
+    function shiftClock(value, deltaMinutes) {
+      const match = /^(\d{2}):(\d{2})$/.exec(value || '');
+      if (!match) return { time: value, days: 0 };
+      const total = Number(match[1]) * 60 + Number(match[2]) + deltaMinutes;
+      const minutes = ((total % 1440) + 1440) % 1440;
+      const pad = n => String(n).padStart(2, '0');
+      return { time: pad(Math.floor(minutes / 60)) + ':' + pad(minutes % 60), days: Math.floor(total / 1440) };
+    }
+
+    function serverLocalDelta(serverOffset) {
+      return -new Date().getTimezoneOffset() - Math.round(Number(serverOffset || 0) / 60);
+    }
+
+    function serverClockToLocal(value, serverOffset) { return shiftClock(value, serverLocalDelta(serverOffset)); }
+    function localClockToServer(value, serverOffset) { return shiftClock(value, -serverLocalDelta(serverOffset)); }
+
+    function scheduleTzNote(serverTz, serverOffset) {
+      return serverLocalDelta(serverOffset) === 0
+        ? '按你电脑的时间填写（与服务器时区相同）'
+        : '按你电脑的时间填写；服务器时区是 ' + (serverTz || '未知') + '，保存时自动换算';
+    }
+
     // 服务器时间 HH:MM → 浏览器本地时间：先按服务器 UTC 偏移换成 UTC，再按浏览器偏移换回本地
     function serverTimeToBrowserLocal(value, serverOffset) {
       const match = /^(\d{2}):(\d{2})$/.exec(value || '');
@@ -2224,10 +2286,7 @@
 
     function renderAutoUpdateTimeNote() {
       const info = autoUpdateInfo || {};
-      const value = $('autoUpdateTime').value;
-      $('autoUpdateTimeNote').textContent = '服务器时区：' + (info.server_tz || '未知')
-        + '，服务器当前 ' + formatServerClock(info.server_time, info.server_utc_offset)
-        + '；' + (value || '--:--') + ' 相当于浏览器本地 ' + serverTimeToBrowserLocal(value, info.server_utc_offset);
+      $('autoUpdateTimeNote').textContent = scheduleTzNote(info.server_tz, info.server_utc_offset);
     }
 
     // 版本号比较："v5.3.4" / "0.3.40" 都可以；无法识别时返回 null
@@ -2336,7 +2395,7 @@
       // 轮询时不覆盖用户正在编辑的输入框
       if (!$('autoUpdateCard').contains(document.activeElement)) {
         $('autoUpdateEnabled').checked = settings.enabled !== false;
-        $('autoUpdateTime').value = settings.time || '04:10';
+        $('autoUpdateTime').value = serverClockToLocal(settings.time || '04:10', autoUpdateInfo.server_utc_offset).time;
         $('autoUpdateCoreMinAge').value = settings.core_min_age_days ?? 3;
         $('autoUpdatePanelMinAge').value = settings.panel_min_age_days ?? 0;
       }
@@ -2367,7 +2426,7 @@
     function autoUpdatePayload() {
       return {
         enabled: $('autoUpdateEnabled').checked,
-        time: $('autoUpdateTime').value,
+        time: localClockToServer($('autoUpdateTime').value, (autoUpdateInfo || {}).server_utc_offset).time,
         core_min_age_days: $('autoUpdateCoreMinAge').value.trim(),
         panel_min_age_days: $('autoUpdatePanelMinAge').value.trim()
       };
@@ -2451,7 +2510,44 @@
     async function loadNotifySettings() {
       const res = await api('/api/notify-settings');
       renderNotifySettings(res);
+      loadNotifyLog();
       return res;
+    }
+
+    // 最近 15 条通知（/var/log/mosctl-notify.log），失败的标红并显示原因
+    async function loadNotifyLog() {
+      const box = $('notifyLogList');
+      if (!box) return;
+      const res = await api('/api/notify-log', {silent: true});
+      const items = Array.isArray(res && res.items) ? res.items : [];
+      box.replaceChildren();
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sync-test-message';
+        empty.textContent = '还没有发送记录';
+        box.appendChild(empty);
+        return;
+      }
+      items.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'notify-log-row' + (item.ok ? '' : ' failed');
+        const when = document.createElement('time');
+        when.textContent = formatTime(item.at);
+        const title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = item.title || '';
+        if (!item.ok) {
+          const err = document.createElement('span');
+          err.className = 'err';
+          err.textContent = item.detail || '发送失败';
+          title.appendChild(err);
+        }
+        const state = document.createElement('span');
+        state.className = 'state';
+        state.textContent = item.ok ? '已送达' : '发送失败';
+        row.append(when, title, state);
+        box.appendChild(row);
+      });
     }
 
     async function saveNotifySettings() {
@@ -2489,6 +2585,7 @@
         const text = (res.host ? res.host + '：' : '') + (res.message || '');
         $('notifyTestResult').textContent = text;
         toast(res.success ? '测试通知已发送' : '测试通知失败', text);
+        loadNotifyLog();
       } finally {
         setBusy(false);
       }

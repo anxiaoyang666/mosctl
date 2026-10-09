@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.49"
+PANEL_VERSION = "0.3.50"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -274,6 +274,11 @@ def explain_log_line(line):
         entry["kind"] = "notice"
     elif message == "read err":
         entry["summary"] = "读取 DNS 请求时出现异常"
+    elif message == "upstream error":
+        qname = str(payload.get("qname", "")).rstrip(".")
+        upstream = re.sub(r"^[a-z]+://", "", str(payload.get("upstream", "")))
+        reason = "超时" if "deadline exceeded" in error_text or "timeout" in error_text else "失败"
+        entry["summary"] = f"上游查询{reason}：{qname or '未知域名'}" + (f"（{upstream}）" if upstream else "")
     else:
         entry["summary"] = message or entry["summary"]
 
@@ -311,11 +316,12 @@ def is_lifecycle_entry(entry):
 
 def summarize_lifecycle(group):
     messages = [item.get("message") for item in group]
-    modules = messages.count("loading plugin")
+    starts = max(1, messages.count("all plugins are loaded"))
+    modules = messages.count("loading plugin") // starts
     started = "all plugins are loaded" in messages
     stopped = "all plugins were closed" in messages or "signal received" in messages
     if started and stopped:
-        summary = f"mosdns 已重启（重新加载 {modules} 个模块）"
+        summary = f"mosdns 已重启（重新加载 {modules} 个模块）" if starts == 1 else f"mosdns 连续重启 {starts} 次（每次加载 {modules} 个模块）"
     elif started:
         summary = f"mosdns 已启动（加载 {modules} 个模块）"
     elif stopped:
@@ -3575,6 +3581,36 @@ def flush_cache_via_api(timeout=5):
         return False, str(exc)
 
 
+METRIC_LINE_RE = re.compile(r'^(mosdns_cache_(?:query|hit|lazy_hit)_total|mosdns_cache_size_current)\{[^}]*\}\s+([0-9.eE+]+)\s*$')
+
+
+def mosdns_metrics(timeout=2):
+    """mosdns 自带的 /metrics（Prometheus 文本）：cache 插件的查询、命中、过期缓存应答次数和当前条目数。
+    计数从 mosdns 启动开始；拿不到返回 None。"""
+    address = config_api_address()
+    if not address:
+        return None
+    try:
+        req = urlrequest.Request(f"http://{address}/metrics", headers={"User-Agent": "mosdns-web-manager"})
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            text = resp.read(512 * 1024).decode("utf-8", "replace")
+    except Exception:
+        return None
+    values = {}
+    for line in text.splitlines():
+        match = METRIC_LINE_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = values.get(match.group(1), 0) + int(float(match.group(2)))
+    if "mosdns_cache_query_total" not in values:
+        return None
+    return {
+        "queries": values.get("mosdns_cache_query_total", 0),
+        "hits": values.get("mosdns_cache_hit_total", 0),
+        "lazy_hits": values.get("mosdns_cache_lazy_hit_total", 0),
+        "cache_size": values.get("mosdns_cache_size_current", 0),
+    }
+
+
 def flush_cache():
     ok, message = flush_cache_via_api()
     if ok:
@@ -3810,6 +3846,7 @@ def api_status():
             "panel_version_text": f"Mosctl v{PANEL_VERSION}",
             "web_port": env.get("WEB_PORT", "7840"),
             "health": service_health_summary(running, enabled, rescue, values),
+            "metrics": mosdns_metrics() if running else None,
             **server_time_info(),
             **template_version_info(),
             **values,

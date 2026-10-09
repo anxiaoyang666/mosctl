@@ -71,6 +71,31 @@ class PanelReviewTest(unittest.TestCase):
         self.assertEqual(entries[0]["kind"], "error", "真正的错误单独保留")
         self.assertEqual(entries[1]["detail"], "合并了 5 行启停日志；模块：cache、hosts")
 
+    def test_upstream_error_and_double_restart(self):
+        line = '2026-10-08T23:26:47+00:00\tWARN\tforward_local\tupstream error\t{"qname": "mdap.alipay.com.", "upstream": "udp://119.29.29.29", "error": "context deadline exceeded"}'
+        entry = self.app.parse_log_entries(line)[0]
+        self.assertEqual(entry["summary"], "上游查询超时：mdap.alipay.com（119.29.29.29）")
+        def l(t, msg, payload=""):
+            return "\t".join(x for x in (f"2026-10-09T10:35:{t:02d}+00:00", "INFO", msg, payload) if x)
+        lines = [l(48, "all plugins are loaded"), l(48, "loading plugin", '{"tag": "a"}'), l(47, "all plugins were closed"),
+                 l(46, "all plugins are loaded"), l(46, "loading plugin", '{"tag": "a"}'), l(45, "all plugins were closed")]
+        self.assertEqual(self.app.parse_log_entries("\n".join(lines))[0]["summary"], "mosdns 连续重启 2 次（每次加载 1 个模块）")
+
+    def test_metrics_parsing(self):
+        app = self.app
+        app.config_api_address = lambda: "127.0.0.1:8080"
+        text = ("# HELP x\nmosdns_cache_hit_total{tag=\"cache\"} 13051\nmosdns_cache_lazy_hit_total{tag=\"cache\"} 11887\n"
+                "mosdns_cache_query_total{tag=\"cache\"} 14316\nmosdns_cache_size_current{tag=\"cache\"} 2167\ngo_goroutines 12\n")
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return text.encode()
+        app.urlrequest.urlopen = lambda req, timeout=2: Resp()
+        self.assertEqual(app.mosdns_metrics(), {"queries": 14316, "hits": 13051, "lazy_hits": 11887, "cache_size": 2167})
+        def boom(*a, **k): raise OSError("down")
+        app.urlrequest.urlopen = boom
+        self.assertIsNone(app.mosdns_metrics())
+
     # --- 最近通知 ---
     def test_recent_notifications(self):
         log = Path(self.tmp.name) / "notify.log"

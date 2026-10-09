@@ -343,6 +343,8 @@
     .log-summary { color: var(--text); font-size: 13.5px; font-weight: 550; line-height: 1.4; }
     .log-meta, .log-detail { color: var(--faint); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
     .log-detail { font-family: var(--mono); font-size: 11.5px; }
+    .log-card.collapsible { cursor: pointer; }
+    .log-card.collapsible:hover .log-summary { color: var(--accent); }
     .log-empty { padding: 18px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); color: var(--faint); text-align: center; }
 
     /* ===== 列表 ===== */
@@ -543,29 +545,29 @@
           <div class="status-foot" id="healthState">等待检测</div>
         </div>
         <div class="status-cell">
-          <div class="status-label">开机自启</div>
-          <div class="status-value" id="enabled">--</div>
-          <div class="status-foot">systemd enable</div>
+          <div class="status-label">解析请求</div>
+          <div class="status-value" id="dnsQueries">--</div>
+          <div class="status-foot" id="dnsQpm">mosdns 启动以来</div>
+        </div>
+        <div class="status-cell">
+          <div class="status-label">缓存命中率</div>
+          <div class="status-value" id="dnsHitRate">--</div>
+          <div class="status-foot" id="dnsLazyRate">--</div>
+        </div>
+        <div class="status-cell">
+          <div class="status-label">缓存条目</div>
+          <div class="status-value" id="dnsCacheSize">--</div>
+          <div class="status-foot" id="dnsCacheTtl">--</div>
         </div>
         <div class="status-cell">
           <div class="status-label">救援模式</div>
           <div class="status-value" id="rescue">--</div>
-          <div class="status-foot">UDP 53 接管</div>
+          <div class="status-foot">开机自启：<span id="enabled">--</span></div>
         </div>
         <div class="status-cell">
           <div class="status-label">MosDNS</div>
           <div class="status-value" id="version">--</div>
-          <div class="status-foot">解析内核</div>
-        </div>
-        <div class="status-cell">
-          <div class="status-label">Mosctl</div>
-          <div class="status-value" id="panelVersion">--</div>
-          <div class="status-foot">Web 面板</div>
-        </div>
-        <div class="status-cell">
-          <div class="status-label">Web 端口</div>
-          <div class="status-value" id="webPort">--</div>
-          <div class="status-foot">默认 7840</div>
+          <div class="status-foot">面板 <span id="panelVersion">--</span> · 端口 <span id="webPort">--</span></div>
         </div>
       </section>
 
@@ -649,7 +651,7 @@
               </div>
             </section>
 
-            <section class="panel">
+            <section class="panel" id="commandPanel" hidden>
               <div class="panel-head">
                 <div>
                   <h3>命令输出</h3>
@@ -1277,13 +1279,49 @@
       });
     }
 
+    // 解析统计来自 mosdns 自带的 /metrics（缓存插件的计数，mosdns 启动后从 0 开始）；
+    // 每分钟请求数用相邻两次刷新的差值算
+    let lastDnsSample = null;
+    function renderDnsMetrics(metrics, ttl) {
+      if (!metrics) {
+        ['dnsQueries', 'dnsHitRate', 'dnsCacheSize'].forEach(id => { $(id).textContent = '--'; });
+        $('dnsQpm').textContent = '读不到 mosdns 统计';
+        $('dnsLazyRate').textContent = '--';
+        $('dnsCacheTtl').textContent = '--';
+        return;
+      }
+      const fmt = n => n >= 10000 ? (n / 10000).toFixed(n >= 100000 ? 0 : 1) + ' 万' : String(n);
+      const queries = metrics.queries || 0;
+      $('dnsQueries').textContent = fmt(queries);
+      const now = Date.now();
+      if (lastDnsSample && queries >= lastDnsSample.queries && now > lastDnsSample.at) {
+        const perMin = (queries - lastDnsSample.queries) / ((now - lastDnsSample.at) / 60000);
+        $('dnsQpm').textContent = '约 ' + Math.round(perMin) + ' 次 / 分钟';
+      } else {
+        $('dnsQpm').textContent = 'mosdns 启动以来';
+      }
+      lastDnsSample = {queries, at: now};
+      const rate = queries ? Math.round((metrics.hits || 0) / queries * 1000) / 10 : 0;
+      $('dnsHitRate').textContent = queries ? rate + '%' : '--';
+      $('dnsLazyRate').textContent = queries ? '其中过期缓存先应答 ' + Math.round((metrics.lazy_hits || 0) / queries * 100) + '%' : '--';
+      $('dnsCacheSize').textContent = fmt(metrics.cache_size || 0);
+      const t = Number(ttl || 0);
+      $('dnsCacheTtl').textContent = t ? '过期缓存保留 ' + (t >= 86400 ? Math.round(t / 86400) + ' 天' : Math.round(t / 3600) + ' 小时') : '--';
+    }
+
+    function showCommandOutput(text) {
+      $('commandOutput').textContent = text;
+      $('commandPanel').hidden = false;
+    }
+
     async function loadStatus() {
       const res = await api('/api/status', {silent: true});
       if (!Object.keys(res || {}).length) return;
       $('running').textContent = res.running ? '运行中' : '已停止';
       $('running').className = 'status-value ' + (res.running ? 'ok' : 'bad');
       $('enabled').textContent = res.enabled ? '已启用' : '未启用';
-      $('enabled').className = 'status-value ' + (res.enabled ? 'ok' : 'warn');
+      $('enabled').className = res.enabled ? '' : 'warn';
+      renderDnsMetrics(res.metrics, res.ttl);
       $('rescue').textContent = res.rescue ? '已接管' : '关闭';
       $('rescue').className = 'status-value ' + (res.rescue ? 'warn' : 'ok');
       $('version').textContent = res.version_clean || res.version || '--';
@@ -1310,7 +1348,7 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({action})
         });
-        $('commandOutput').textContent = res.message || '';
+        showCommandOutput(res.message || '');
         if (action === 'upgrade_panel' && res.success && Number(res.reload_after || 0) > 0) {
           startReloadCountdown(res.message || '升级完成', Number(res.reload_after || 60));
         } else {
@@ -1669,7 +1707,7 @@
           renderRuleSaveResult('ok', ruleSaveHeadline(res), extra);
           toast('保存完成', res.message || '');
         }
-        $('commandOutput').textContent = res.message || '';
+        showCommandOutput(res.message || '');
         await loadStatus();
       } finally {
         stopStages();
@@ -2242,7 +2280,7 @@
       setBusy(true, '正在检查可用更新（不会安装），最多约 2 分钟...');
       try {
         const res = await api('/api/auto-update/check', {method: 'POST'});
-        $('commandOutput').textContent = res.message || '';
+        showCommandOutput(res.message || '');
         toast(res.success ? '检查完成（未安装）' : '检查失败', res.message || '');
         renderAutoUpdate(res);
       } finally {
@@ -2484,7 +2522,7 @@
           body: JSON.stringify({id})
         });
         toast(res.success ? '恢复完成' : '恢复失败', res.message || '');
-        $('commandOutput').textContent = res.message || '';
+        showCommandOutput(res.message || '');
         await loadStatus();
         await loadBackups();
       } finally {
@@ -2534,6 +2572,13 @@
         const detail = document.createElement('div');
         detail.className = 'log-detail';
         detail.textContent = entry.detail || entry.raw || '';
+        // 普通事件的原始内容默认收起，点一下这一条再展开；警告和错误直接显示
+        if (entry.kind !== 'warn' && entry.kind !== 'error') {
+          detail.hidden = true;
+          card.classList.add('collapsible');
+          card.title = '点击查看原始日志';
+          card.addEventListener('click', () => { detail.hidden = !detail.hidden; });
+        }
 
         main.append(summary, meta, detail);
         card.append(level, main);

@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.39"
+PANEL_VERSION = "0.3.40"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -399,6 +399,8 @@ SITE_NAME_MAX_LEN = 20
 DEFAULT_SITE_NAME = "mosdns"
 # 通知正文里的时间是给微信里的人看的服务器本地时间（不经过浏览器格式化），和 mihomo 的 notify.sh 一致
 NOTIFY_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+# 通知里的时间统一用北京时间（容器大多跑在 UTC），和 mihomo 面板的 notify.sh 一致
+NOTIFY_TZ = timezone(timedelta(hours=8))
 NOTIFY_ICONS = {"success": "✅", "warning": "⚠️", "failure": "❌", "info": "🔔"}
 NOTIFY_STATE_THREAD_LOCK = threading.Lock()
 
@@ -524,7 +526,7 @@ def build_notification(level, subject, lines, site=None, now=None):
         if line:
             body.append(line)
     body = body[:NOTIFY_MAX_LINES]
-    stamp = (datetime.fromtimestamp(now) if now else datetime.now()).strftime(NOTIFY_TIME_FORMAT)
+    stamp = datetime.fromtimestamp(now if now else time.time(), NOTIFY_TZ).strftime(NOTIFY_TIME_FORMAT)
     content = ("\n".join(body) + "\n\n" if body else "") + f"📅 {stamp}"
     return title, content
 

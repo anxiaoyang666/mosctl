@@ -737,7 +737,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, install)
 
     def test_panel_version(self):
-        self.assertIn('PANEL_VERSION = "0.3.39"', APP.read_text(encoding="utf-8"))
+        self.assertIn('PANEL_VERSION = "0.3.40"', APP.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

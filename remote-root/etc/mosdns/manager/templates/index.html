@@ -352,6 +352,22 @@
     .backup-name, .sync-test-peer { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
     .backup-meta, .sync-test-message { margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .sync-test-status { font-size: 12px; font-weight: 600; white-space: nowrap; }
+    .mono { font-family: var(--mono); }
+    .token-actions { grid-template-columns: minmax(0, 1fr) auto auto auto; }
+    .pill.warn-pill { background: var(--warning-soft); color: var(--warning); }
+    .panel h3 .pill { margin-left: 6px; vertical-align: middle; }
+    .sync-peer-list { display: grid; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+    .sync-peer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--line); font-size: 13px; }
+    .sync-peer:first-child { border-top: 0; }
+    .sync-peer strong { font-weight: 600; }
+    .sync-peer .kind { margin-left: 6px; color: var(--muted); font-size: 12px; }
+    .sync-peer small { display: block; margin-top: 2px; color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
+    .sync-peer .peer-msg { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .sync-peer-edit { margin-top: 10px; }
+    .sync-peer-edit summary { color: var(--muted); font-size: 12.5px; cursor: pointer; }
+    .sync-peer-edit summary:hover { color: var(--text); }
+    .sync-peer-edit textarea { margin-top: 8px; }
+    [hidden] { display: none !important; }
     .backup-item button { min-height: 28px; padding: 0 10px; font-size: 12.5px; }
     .notify-log { display: grid; margin-top: 6px; }
     .notify-log-row { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; gap: 12px; align-items: baseline; padding: 11px 2px; border-top: 1px solid var(--line); font-size: 12.5px; }
@@ -516,11 +532,11 @@
         </div>
         <div class="toolbar">
           <button type="button" onclick="loadStatus()">刷新状态</button>
-          <button type="button" class="soft" onclick="loadDashboardLogs()">刷新日志</button>
+          <button type="button" class="soft" id="refreshLogsButton" onclick="loadDashboardLogs()">刷新日志</button>
         </div>
       </header>
 
-      <section class="status-ribbon" aria-label="服务状态">
+      <section class="status-ribbon" id="statusRibbon" aria-label="服务状态">
         <div class="status-cell">
           <div class="status-label">服务状态</div>
           <div class="status-value" id="running">--</div>
@@ -698,7 +714,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h3>分流规则</h3>
+              <h3>分流规则 <span class="pill" id="ruleCount">--</span> <span class="pill warn-pill" id="ruleDirty" hidden>未保存</span></h3>
               <div class="panel-note">强制国内/国外规则支持同步，Hosts 仅本机生效。</div>
             </div>
             <button type="button" class="primary" onclick="saveRule()">保存规则</button>
@@ -719,7 +735,7 @@
               <pre class="example-box" id="ruleExample">暂无示例</pre>
               <button type="button" class="soft" onclick="appendRuleExample()">追加示例</button>
             </div>
-            <textarea id="ruleContent" spellcheck="false"></textarea>
+            <textarea id="ruleContent" spellcheck="false" oninput="updateRuleMeta()"></textarea>
           </div>
           <div class="rule-save-result" id="ruleSaveResult" role="status" aria-live="polite" hidden>
             <div class="rule-save-head" id="ruleSaveHead"></div>
@@ -787,20 +803,25 @@
             </div>
             <label class="check-row"><input id="syncEnabled" type="checkbox"> 启用规则同步</label>
             <label for="syncToken">同步密钥</label>
-            <div class="input-actions">
-              <input id="syncToken" autocomplete="off">
+            <div class="input-actions token-actions">
+              <input id="syncToken" type="password" autocomplete="off" spellcheck="false" class="mono">
+              <button type="button" onclick="toggleSyncTokenVisible(this)" aria-label="显示或隐藏同步密钥">显示</button>
               <button type="button" onclick="generateSyncToken()">生成</button>
               <button type="button" onclick="copySyncToken()">复制</button>
             </div>
-            <label for="syncPeers" style="margin-top: 12px;">其他 mosctl / mihomo 面板地址，每行一个</label>
-            <textarea class="compact-textarea" id="syncPeers" oninput="updateSyncPeersWarning()"></textarea>
+            <label style="margin-top: 14px;">参与同步的面板</label>
+            <div class="sync-peer-list" id="syncPeerList"></div>
+            <details class="sync-peer-edit">
+              <summary>编辑地址（每行一个 mosctl / mihomo 面板地址）</summary>
+              <textarea class="compact-textarea mono" id="syncPeers" rows="9" oninput="updateSyncPeersWarning(); renderSyncPeerList()"></textarea>
+            </details>
             <p class="hint warn" id="syncPeersWarning" hidden>同步密钥会以明文发送，建议仅在可信内网使用（有节点使用 http:// 地址）</p>
             <div class="actions" style="margin-top: 10px;">
               <button type="button" class="primary" onclick="saveSyncSettings()">保存同步</button>
               <button type="button" onclick="testSyncPeers()">测试连通</button>
             </div>
             <div class="sync-test-message" id="syncJobSummary" style="white-space: pre-wrap;"></div>
-            <div class="sync-test-list" id="syncTestResults"></div>
+            <div class="sync-test-list" id="syncTestResults" hidden></div>
           </section>
 
           <section class="panel">
@@ -1225,6 +1246,9 @@
         activeTab.classList.add('active');
         activeTab.setAttribute('aria-current', 'page');
       }
+      // 状态条和「刷新日志」只属于态势总览，其他页面不重复占位
+      $('statusRibbon').hidden = name !== 'overview';
+      $('refreshLogsButton').hidden = name !== 'overview';
       $('pageTitle').textContent = viewMeta[name][0];
       $('pageSubtitle').textContent = viewMeta[name][1];
       history.replaceState(null, '', '#' + name);
@@ -1508,10 +1532,29 @@
       }
     }
 
+    // 标题旁：当前规则文件有几条（不算空行和注释），改了还没保存时提示
+    function updateRuleMeta() {
+      const editor = $('ruleContent');
+      const count = editor.value.split('\n').map(line => line.split('#')[0].trim()).filter(Boolean).length;
+      $('ruleCount').textContent = count + ' 条';
+      $('ruleDirty').hidden = editor.value === (editor.dataset.saved ?? editor.value);
+    }
+
+    let ruleSelectPrevious = null;
+
     async function loadRule() {
       const rule = $('ruleSelect').value;
+      // 切换规则文件前，当前文件有没保存的改动就先问一句
+      if (ruleSelectPrevious && ruleSelectPrevious !== rule && !$('ruleDirty').hidden
+          && !confirm('当前规则有改动还没保存，切换后会丢失。继续切换吗？')) {
+        $('ruleSelect').value = ruleSelectPrevious;
+        return;
+      }
+      ruleSelectPrevious = rule;
       const res = await api('/api/rules/' + encodeURIComponent(rule));
       $('ruleContent').value = res.content || '';
+      $('ruleContent').dataset.saved = $('ruleContent').value;
+      updateRuleMeta();
       $('ruleTitle').textContent = res.label || '规则文件';
       $('ruleSummary').textContent = res.summary || '';
       $('ruleFormat').textContent = res.format || '';
@@ -1598,6 +1641,10 @@
           throw error;
         }
         stopStages();
+        if (res.success) {
+          $('ruleContent').dataset.saved = $('ruleContent').value;
+          updateRuleMeta();
+        }
         if (!res.success) {
           renderRuleSaveResult('error', '保存失败', res.message || '后端没有返回结果，请刷新页面后重试');
           toast('保存失败', res.message || '');
@@ -1715,6 +1762,83 @@
       renderSyncTestResults([]);
     }
 
+    let syncPeerResults = new Map();
+    const syncPeerNames = new Map();
+
+    // 参与同步的面板：名字从对方的 /api/site-info 取，端口 7840 是 mosdns、7838 是 mihomo；测试连通后结果显示在同一行
+    function renderSyncPeerList() {
+      const box = $('syncPeerList');
+      if (!box) return;
+      const peers = ($('syncPeers').value || '').split(/[\n,|]+/).map(line => line.trim()).filter(Boolean);
+      box.replaceChildren();
+      if (!peers.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sync-peer';
+        empty.textContent = '还没有填写其他面板地址，点下面「编辑地址」添加';
+        box.appendChild(empty);
+        return;
+      }
+      peers.forEach(peer => {
+        let host = peer, port = '';
+        try { const url = new URL(/^https?:\/\//.test(peer) ? peer : 'http://' + peer); host = url.hostname; port = url.port; } catch (e) {}
+        const kind = port === '7840' ? 'mosdns' : (port === '7838' ? 'mihomo' : '');
+        const self = host === location.hostname && port === (location.port || '7840');
+        const result = syncPeerResults.get(peer);
+        const row = document.createElement('div');
+        row.className = 'sync-peer';
+        row.dataset.peer = peer;
+        const info = document.createElement('div');
+        const name = document.createElement('strong');
+        name.className = 'peer-name';
+        name.textContent = syncPeerNames.get(peer) || host;
+        const kindEl = document.createElement('span');
+        kindEl.className = 'kind';
+        kindEl.textContent = kind;
+        const addr = document.createElement('small');
+        addr.textContent = peer;
+        info.append(name, kindEl, addr);
+        if (result && !self && result.message) {
+          const msg = document.createElement('span');
+          msg.className = 'peer-msg';
+          msg.textContent = result.message;
+          info.appendChild(msg);
+        }
+        row.appendChild(info);
+        if (self || result) {
+          const badge = document.createElement('span');
+          badge.className = 'pill' + (self || result.success ? '' : ' warn-pill');
+          badge.textContent = self ? '本机' : (result.success ? '正常' : '异常');
+          row.appendChild(badge);
+        }
+        box.appendChild(row);
+      });
+      peers.forEach(async peer => {
+        if (syncPeerNames.has(peer)) return;
+        syncPeerNames.set(peer, '');
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 4000);
+          const base = /^https?:\/\//.test(peer) ? peer : 'http://' + peer;
+          const resp = await fetch(base.replace(/\/$/, '') + '/api/site-info', {signal: ctrl.signal});
+          clearTimeout(timer);
+          const info = await resp.json();
+          if (info && info.site_name) {
+            syncPeerNames.set(peer, info.site_name);
+            box.querySelectorAll('.sync-peer').forEach(row => {
+              if (row.dataset.peer === peer) row.querySelector('.peer-name').textContent = info.site_name;
+            });
+          }
+        } catch (e) {}
+      });
+    }
+
+    function toggleSyncTokenVisible(button) {
+      const input = $('syncToken');
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      button.textContent = show ? '隐藏' : '显示';
+    }
+
     function updateSyncPeersWarning() {
       const warning = $('syncPeersWarning');
       if (!warning) return;
@@ -1747,6 +1871,8 @@
     }
 
     function renderSyncTestResults(results) {
+      syncPeerResults = new Map((results || []).map(item => [item.peer, item]));
+      renderSyncPeerList();
       const list = $('syncTestResults');
       if (!list) return;
       list.textContent = '';
@@ -1791,6 +1917,7 @@
           $('syncToken').value = res.token || '';
           $('syncPeers').value = res.peers_text || '';
           updateSyncPeersWarning();
+          renderSyncPeerList();
         }
       } finally {
         setBusy(false);

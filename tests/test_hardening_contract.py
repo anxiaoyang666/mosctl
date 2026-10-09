@@ -156,7 +156,7 @@ class HardeningContractTest(unittest.TestCase):
         self.assertIn('id="syncPeersWarning"', index)
         self.assertIn("同步密钥会以明文发送，建议仅在可信内网使用", index)
         self.assertIn("function updateSyncPeersWarning", index)
-        self.assertIn('oninput="updateSyncPeersWarning()"', index)
+        self.assertIn('oninput="updateSyncPeersWarning(); renderSyncPeerList()"', index)
         self.assertIn("## Rule Sync", readme)
         self.assertIn("clear text", readme)
         self.assertIn("## 规则同步", readme_zh)

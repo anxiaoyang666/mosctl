@@ -38,7 +38,7 @@ class DevicesViewRemovedTest(unittest.TestCase):
         for marker in ("设备状态", 'id="view-devices"', "loadDevices", "renderDevices", "mihomoController", "deviceDomainOpenState", "formatBytes"):
             self.assertNotIn(marker, text, marker)
         # 规则同步的文案仍提到 mihomo 面板，这是同步目标，不是设备页
-        self.assertIn("其他 mosctl / mihomo 面板地址", text)
+        self.assertIn("mosctl / mihomo 面板地址", text)
 
     def test_readmes_drop_mihomo_keys(self):
         for name in ("README.md", "README.zh-CN.md"):

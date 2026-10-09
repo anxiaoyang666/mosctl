@@ -29,7 +29,7 @@ class MosctlCrossPanelRuleSyncContractTest(unittest.TestCase):
         text = index_source()
 
         self.assertIn("mosctl / mihomo", text)
-        self.assertIn("其他 mosctl / mihomo 面板地址", text)
+        self.assertIn("mosctl / mihomo 面板地址", text)
         self.assertNotIn("其他 mosdns 面板", text)
 
 

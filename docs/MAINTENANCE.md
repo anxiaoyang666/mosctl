@@ -128,7 +128,7 @@ mosctl rescue disable
 - 内核：安装 GitHub `releases/latest` 里本机架构的 zip。不降级。沙盒和 20 秒健康检查与自动更新相同。
 - 面板：下载 `.env` 里 `MOSCTL_REPO_URL` / `MOSCTL_BRANCH` 的分支压缩包。远端 `PANEL_VERSION` 必须更高。
 
-改完仓库并推到该分支后，已安装的机器要等自动更新，或在升级中心点检测再升级。检测按钮请求 `GET /api/panel-upgrade-source?refresh=1`，不用一小时缓存。
+改完仓库并推到该分支后，已安装的机器要等自动更新，或在升级中心点检测再升级。检测按钮请求 `GET /api/panel-upgrade-source?refresh=true`，不用一小时缓存。 |
 
 只想更新配置模板、不换程序：
 

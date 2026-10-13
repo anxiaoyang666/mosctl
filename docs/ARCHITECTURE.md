@@ -101,7 +101,7 @@ cron
 | `GET /api/site-info` | 不需要登录。只返回 `SITE_NAME`，并带 `Access-Control-Allow-Origin: *` |
 | `GET /api/status` | 运行状态、救援模式、版本、模板版本、上游、健康摘要、mosdns 指标 |
 | `GET /api/core-version` | 查 mosdns `releases/latest` |
-| `GET /api/panel-upgrade-source` | 远端面板版本。`refresh=1` 跳过一小时缓存 |
+| `GET /api/panel-upgrade-source` | 远端面板版本。`refresh=true` 跳过一小时缓存 |
 | `POST /api/control` | `start` `stop` `restart` `update` `test` `flush` `rescue_on` `rescue_off` `restore_default` `upgrade_core` `upgrade_panel` |
 | `GET/POST /api/settings` | 解析策略里的上游和 TTL |
 | `GET/POST /api/account-settings` | 用户名和密码。改密码必须提交当前密码 |

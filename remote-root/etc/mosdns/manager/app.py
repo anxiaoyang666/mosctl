@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.50"
+PANEL_VERSION = "0.3.51"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -3875,7 +3875,8 @@ def api_control():
     commands = {
         "start": (["systemctl", "start", "mosdns"], 30),
         "stop": (["systemctl", "stop", "mosdns"], 30),
-        "update": ([MOSCTL, "update"], 180),
+        # 全部镜像都挂起时，两轮下载加上默认 180 秒重试会超过 180 秒；留出余量，避免重试还没跑完就被掐掉、通知发不出去
+        "update": ([MOSCTL, "update"], 1200),
         "test": ([MOSCTL, "test"], 60),
         "rescue_on": ([MOSCTL, "rescue", "enable"], 60),
         "rescue_off": ([MOSCTL, "rescue", "disable"], 60),

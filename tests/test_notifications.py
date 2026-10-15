@@ -328,7 +328,11 @@ class NotifyCliTest(Base):
         self.assertEqual(cli.main(["--key", "geo", "--event", "fail", "Geo 规则更新失败", "geosite_cn.txt 下载失败"]), 0)
         self.assertEqual(cli.main(["--key", "geo", "--event", "fail", "Geo 规则更新失败", "geosite_cn.txt 下载失败"]), 0)
         self.assertEqual(cli.main(["--key", "geo", "--event", "ok", "Geo 规则更新已恢复", "规则文件已更新，mosdns 已重启"]), 0)
-        self.assertEqual([r["body"]["title"] for r in self.requests], ["❌ 联通 · Geo 规则更新失败", "✅ 联通 · Geo 规则更新已恢复"])
+        self.assertEqual(cli.main(["--key", "geo", "--event", "warn", "规则未更新，继续使用旧规则", "geosite_cn.txt 下载失败"]), 0)
+        self.assertEqual(
+            [r["body"]["title"] for r in self.requests],
+            ["❌ 联通 · Geo 规则更新失败", "✅ 联通 · Geo 规则更新已恢复", "⚠️ 联通 · 规则未更新，继续使用旧规则"],
+        )
         with unittest.mock.patch("sys.stderr", io.StringIO()):
             self.assertEqual(cli.main(["--bogus"]), 0)
         self.app.notify_failure = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
@@ -340,7 +344,11 @@ class GeoCliHookTest(unittest.TestCase):
     def run_update(self, body_of_do_update):
         source = CLI.read_text(encoding="utf-8")
         chunks = []
-        for name in ("notify_cli", "update_geo_rules"):
+        for name in (
+            "env_get", "env_has", "config_uses_rule",
+            "geo_failure_is_download", "geo_should_retry", "geo_retry_delay_seconds", "geo_retry_sleep",
+            "geo_kept_old_rules", "notify_cli", "update_geo_rules",
+        ):
             match = re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}\n", source)
             self.assertIsNotNone(match, name)
             chunks.append(match.group(0))
@@ -348,13 +356,20 @@ class GeoCliHookTest(unittest.TestCase):
             bindir = Path(tmp) / "bin"
             bindir.mkdir()
             record = Path(tmp) / "calls.txt"
+            rules = Path(tmp) / "rules"
+            rules.mkdir()
             fake = bindir / "python3"
             fake.write_text(f'#!/bin/bash\nfor a in "$@"; do printf "%s|" "$a"; done >> "{record}"\necho >> "{record}"\necho noisy\n', encoding="utf-8")
             fake.chmod(0o755)
             notify_cli = Path(tmp) / "notify_cli.py"
             notify_cli.write_text("", encoding="utf-8")
+            # 旧用例不准备规则文件，通知仍是严重失败；等待必须关掉，不能真的睡几分钟
             script = (
-                f'RED=""; PLAIN=""; NOTIFY_CLI="{notify_cli}"\n'
+                f'RED=""; YELLOW=""; PLAIN=""; NOTIFY_CLI="{notify_cli}"\n'
+                f'GEO_UPDATE_RETRY_DELAY=0\n'
+                f'GEO_RULES_DIR="{rules}"\n'
+                f'CONFIG_FILE="{tmp}/no-config.yaml"\n'
+                f'ENV_FILE="{tmp}/no.env"\n'
                 + "\n".join(chunks)
                 + f"\ndo_update_geo_rules() {{\n{body_of_do_update}\n}}\nupdate_geo_rules\necho rc=$?\n"
             )

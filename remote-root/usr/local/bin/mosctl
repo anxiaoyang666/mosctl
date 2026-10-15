@@ -106,21 +106,111 @@ upstream_invalid() {
     return 1
 }
 
+# 把代理前缀整理成 https://host/；空或不是 http(s) 时不输出
+normalize_proxy_prefix() {
+    local prefix="$1"
+    prefix="${prefix#"${prefix%%[![:space:]]*}"}"
+    prefix="${prefix%"${prefix##*[![:space:]]}"}"
+    case "$prefix" in
+        http://*|https://*) ;;
+        *) return 0 ;;
+    esac
+    case "$prefix" in
+        */) printf '%s' "$prefix" ;;
+        *) printf '%s/' "$prefix" ;;
+    esac
+}
+
+# 把直连地址转成代理地址；只处理 GitHub 域名。前缀为空或地址不是 GitHub 时返回 1
+# 用法：apply_github_proxy <前缀> <URL>
+apply_github_proxy() {
+    local prefix="$1"
+    local value="$2"
+    [ -n "$prefix" ] || return 1
+    case "$value" in
+        "$prefix"*) printf '%s' "$value"; return 0 ;;
+        https://raw.githubusercontent.com/*|https://github.com/*)
+            printf '%s%s' "$prefix" "$value"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # 把直连地址转成代理地址；只处理 GitHub 域名，代理为空时原样返回
+# 第二个参数是代理前缀，省略时用 GH_PROXY
 geo_url() {
     local value="$1"
-    if [ -n "$GH_PROXY" ]; then
-        case "$value" in
-            "$GH_PROXY"*) echo "$value"; return ;;
-            https://raw.githubusercontent.com/*|https://github.com/*) echo "${GH_PROXY}${value}"; return ;;
-        esac
+    local prefix proxied
+    prefix="$(normalize_proxy_prefix "${2:-$GH_PROXY}")"
+    if proxied="$(apply_github_proxy "$prefix" "$value")"; then
+        printf '%s' "$proxied"
+        return 0
     fi
-    echo "$value"
+    printf '%s' "$value"
+}
+
+# raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>
+# → https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>
+# Loyalsoldier 规则即 https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/<file>
+jsdelivr_url() {
+    local url="$1"
+    local rest owner repo ref path
+    case "$url" in
+        https://raw.githubusercontent.com/*/*/*/*) ;;
+        *) return 1 ;;
+    esac
+    rest="${url#https://raw.githubusercontent.com/}"
+    owner="${rest%%/*}"
+    rest="${rest#*/}"
+    repo="${rest%%/*}"
+    rest="${rest#*/}"
+    ref="${rest%%/*}"
+    path="${rest#*/}"
+    [ -n "$owner" ] && [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$path" ] && [ "$path" != "$rest" ] || return 1
+    case "${owner}${repo}${ref}${path}" in
+        *[[:space:]\'\"\$\`\\]*) return 1 ;;
+    esac
+    printf 'https://cdn.jsdelivr.net/gh/%s/%s@%s/%s' "$owner" "$repo" "$ref" "$path"
+}
+
+# 每行一个前缀。用户的 GH_PROXY 在最前，重复的只保留第一次。
+# GH_MIRRORS（环境变量优先于 .env）设了就整表替换内置列表；空字符串表示不加这些前缀。
+github_mirror_prefixes() {
+    local configured item prefix seen="" noglob=""
+    if [ -n "${GH_MIRRORS+x}" ]; then
+        configured="$GH_MIRRORS"
+    elif env_has GH_MIRRORS; then
+        configured="$(env_get GH_MIRRORS)"
+    else
+        configured="https://gh-proxy.com/ https://ghfast.top/"
+    fi
+    configured="${configured//,/ }"
+    # 前缀里的 ? 不能被路径展开吃掉
+    case $- in
+        *f*) ;;
+        *) set -f; noglob=1 ;;
+    esac
+    prefix="$(normalize_proxy_prefix "$GH_PROXY")"
+    if [ -n "$prefix" ]; then
+        seen="$prefix"
+        printf '%s\n' "$prefix"
+    fi
+    for item in $configured; do
+        prefix="$(normalize_proxy_prefix "$item")"
+        [ -n "$prefix" ] || continue
+        case " $seen " in
+            *" $prefix "*) continue ;;
+        esac
+        seen="$seen $prefix"
+        printf '%s\n' "$prefix"
+    done
+    [ -z "$noglob" ] || set +f
 }
 
 # 只有标准输出是终端时才显示进度；cron 里跑时进度点会把日志刷满。
 # 必须带超时：GitHub 域名可能被解析成 fake-ip 交给代理，节点不可用时连接会一直挂着，
-# 没有超时就永远走不到"直连失败改走 GH_PROXY"那一步，定时任务也会卡死。
+# 没有超时就永远走不到后面的镜像，定时任务也会卡死。
 WGET_TIMEOUT_OPTS=(--timeout=20 --tries=2)
 wget_fetch() {
     if [ -t 1 ]; then
@@ -130,18 +220,30 @@ wget_fetch() {
     fi
 }
 
-# 先直连，失败再走代理
+# 先直连，失败后按镜像前缀轮流试（用户 GH_PROXY 在最前），最后把 raw GitHub 地址换成 jsDelivr。
+# gh-proxy.com 会间歇性 403，所以不能只靠这一个前缀。
 fetch_url() {
     local output="$1"
     local source="$2"
-    local proxied
+    local prefix proxied jsdelivr
     if wget_fetch "$output" "$source"; then
         return 0
     fi
-    proxied="$(geo_url "$source")"
-    [ "$proxied" != "$source" ] || return 1
-    echo -e "${YELLOW}   直连失败，改走代理重试...${PLAIN}"
-    wget_fetch "$output" "$proxied"
+    while IFS= read -r prefix; do
+        [ -n "$prefix" ] || continue
+        proxied="$(geo_url "$source" "$prefix")"
+        [ -n "$proxied" ] && [ "$proxied" != "$source" ] || continue
+        echo -e "${YELLOW}   直连失败，改走镜像重试：${prefix}${PLAIN}"
+        if wget_fetch "$output" "$proxied"; then
+            return 0
+        fi
+    done < <(github_mirror_prefixes)
+    if jsdelivr="$(jsdelivr_url "$source")"; then
+        echo -e "${YELLOW}   镜像失败，改走 jsDelivr 重试...${PLAIN}"
+        wget_fetch "$output" "$jsdelivr"
+        return $?
+    fi
+    return 1
 }
 
 rescue_enable() {
@@ -230,7 +332,7 @@ carry_over_config_values() {
 }
 
 # 从仓库拉取默认配置模板（remote-root/etc/mosdns/templates/default.yaml）覆盖本机 config.yaml，
-# 保留当前上游 DNS 与 TTL；先直连 raw.githubusercontent.com，失败再走 GH_PROXY
+# 保留当前上游 DNS 与 TTL；先直连 raw.githubusercontent.com，失败再按 GH_PROXY / GH_MIRRORS 试镜像，最后 jsDelivr
 sync_config() {
     if [ -z "$REPO_URL" ]; then
         echo -e "${RED}❌ 未配置 MOSCTL_REPO_URL，无法同步配置。请在 /etc/mosdns/.env 中设置你的仓库地址。${PLAIN}"
@@ -491,7 +593,63 @@ notify_cli() {
     python3 "$NOTIFY_CLI" "$@" >/dev/null 2>&1 || true
 }
 
-# 结尾固定打印「===== 结果: 成功/失败 =====」，面板从 /var/log/mosctl-update.log 里读这一行判断上次结果
+# 重启失败不重试、也不降级：文件已经换过，服务可能没起来。其余失败按下载失败处理
+geo_failure_is_download() {
+    case "${GEO_FAIL_REASON:-}" in
+        *重启失败*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+geo_should_retry() {
+    geo_failure_is_download
+}
+
+# 默认等 3 分钟再试一次。GEO_UPDATE_RETRY_DELAY=0（环境变量优先于 .env）立即重试，测试不用真的睡几分钟
+geo_retry_delay_seconds() {
+    local delay
+    if [ -n "${GEO_UPDATE_RETRY_DELAY+x}" ]; then
+        delay="$GEO_UPDATE_RETRY_DELAY"
+    elif env_has GEO_UPDATE_RETRY_DELAY; then
+        delay="$(env_get GEO_UPDATE_RETRY_DELAY)"
+    else
+        delay=180
+    fi
+    case "$delay" in
+        ''|*[!0-9]*) delay=180 ;;
+    esac
+    if [ "$delay" -gt 1800 ]; then
+        delay=1800
+    fi
+    printf '%s' "$delay"
+}
+
+geo_retry_sleep() {
+    local delay
+    delay="$(geo_retry_delay_seconds)"
+    if [ "$delay" -eq 0 ]; then
+        echo -e "${YELLOW}⏳ 下载失败，立即重试一次...${PLAIN}"
+        return 0
+    fi
+    echo -e "${YELLOW}⏳ 下载失败，${delay} 秒后自动重试一次...${PLAIN}"
+    sleep "$delay"
+}
+
+# 本次要更新的列表都还在且非空：下载失败时继续用旧规则，通知降级成警告
+geo_kept_old_rules() {
+    local dir="${GEO_RULES_DIR:-/etc/mosdns/rules}"
+    [ -s "$dir/geosite_cn.txt" ] && [ -s "$dir/geosite_no_cn.txt" ] || return 1
+    if config_uses_rule geoip_cn.txt; then
+        [ -s "$dir/geoip_cn.txt" ] || return 1
+    fi
+    if config_uses_rule geosite_apple.txt; then
+        [ -s "$dir/geosite_apple.txt" ] || return 1
+    fi
+    return 0
+}
+
+# 结尾固定打印「===== 结果: 成功/失败 =====」，面板从 /var/log/mosctl-update.log 里读这一行判断上次结果。
+# 下载失败先等几分钟自动重试一次，再决定发不发通知；旧规则还在时只发警告，不当成严重故障。
 update_geo_rules() {
     echo "===== $(date '+%F %T') 更新 Geo 规则 ====="
     GEO_FAIL_REASON=""
@@ -500,8 +658,22 @@ update_geo_rules() {
         echo "===== 结果: 成功 ====="
         return 0
     fi
-    echo -e "${RED}❌ 规则更新失败${PLAIN}"
-    notify_cli --key geo --event fail "Geo 规则更新失败" "${GEO_FAIL_REASON:-更新失败，详情见更新日志}"
+    if geo_should_retry; then
+        geo_retry_sleep
+        GEO_FAIL_REASON=""
+        if do_update_geo_rules; then
+            notify_cli --key geo --event ok "Geo 规则更新已恢复" "规则文件已更新，mosdns 已重启"
+            echo "===== 结果: 成功 ====="
+            return 0
+        fi
+    fi
+    if geo_kept_old_rules && geo_failure_is_download; then
+        echo -e "${YELLOW}⚠️  规则未更新，继续使用旧规则${PLAIN}"
+        notify_cli --key geo --event warn "规则未更新，继续使用旧规则" "${GEO_FAIL_REASON:-更新失败，详情见更新日志}"
+    else
+        echo -e "${RED}❌ 规则更新失败${PLAIN}"
+        notify_cli --key geo --event fail "Geo 规则更新失败" "${GEO_FAIL_REASON:-更新失败，详情见更新日志}"
+    fi
     echo "===== 结果: 失败 ====="
     return 1
 }

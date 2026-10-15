@@ -26,7 +26,7 @@ Mosctl 是一个 mosdns 安装、配置和 Web 管理面板工具。它把 [mosd
 | 部分 | 实现 |
 | --- | --- |
 | DNS 内核 | 上游 [IrineSistiana/mosdns](https://github.com/IrineSistiana/mosdns) 的 Linux 发行包，安装到 `/usr/local/bin/mosdns`。本仓库不编译内核。 |
-| Web 面板 | Python 3 标准库 + 发行版软件包 `python3-flask`。入口是 `remote-root/etc/mosdns/manager/app.py`，版本号常量 `PANEL_VERSION`（当前仓库为 `0.3.50`）。 |
+| Web 面板 | Python 3 标准库 + 发行版软件包 `python3-flask`。入口是 `remote-root/etc/mosdns/manager/app.py`，版本号常量 `PANEL_VERSION`（当前仓库为 `0.3.51`）。 |
 | 命令行 | Bash：`install.sh` 与 `remote-root/usr/local/bin/mosctl`。 |
 | 服务 | systemd：`mosdns.service`、`mosdns-web.service`、`mosdns-rescue.service`。 |
 | 定时任务 | 当前用户的 crontab（安装时是 root）。Geo 更新和自动更新各占一行。 |
@@ -85,7 +85,7 @@ WEB_PORT=7840 WEB_USER=admin WEB_SECRET='your-password' bash -c "$(curl -fsSL ht
 | `WEB_USER` | `admin` | 面板用户名 |
 | `WEB_SECRET` | 随机生成 | 面板密码。不填写则随机生成 |
 | `MOSDNS_VERSION` | `latest` | `latest` 下载 GitHub Releases 的 latest 包；其他值当作 tag，例如 `v5.3.3`。只在安装时使用，不写入 `.env` |
-| `GH_PROXY` | `https://gh-proxy.com/` | GitHub 下载失败后拼接在原 URL 前面的前缀 |
+| `GH_PROXY` | `https://gh-proxy.com/` | 安装脚本只用这一个前缀。`mosctl` 失败后还会继续试 `GH_MIRRORS` 和 jsDelivr，见下文 |
 | `MOSCTL_KEEP_ENV` | `1` | 为 `1` 时保留已有 `.env`。设为 `0` 会按本次变量重写 `.env`，原密码和同步密钥会被替换 |
 
 在已经克隆好的仓库里，以 root 执行 `bash install.sh` 时，脚本发现旁边有 `remote-root/` 就不再克隆。
@@ -125,7 +125,7 @@ python3 -m unittest discover -s tests
 
 ## 配置文件（`/etc/mosdns/.env`）
 
-安装脚本会生成 `/etc/mosdns/.env`（权限 `600`）。Web 面板会读取并更新它；`mosctl` 只从中读取 `MOSCTL_REPO_URL`、`MOSCTL_BRANCH` 和 `GH_PROXY`。面板用逐行 `key=value` 解析，不把文件交给 shell 执行。写入时拒绝引号、反斜杠、`$`、反引号、回车、换行和空字节，先写临时文件再替换，并保持权限 `600`。
+安装脚本会生成 `/etc/mosdns/.env`（权限 `600`）。Web 面板会读取并更新它；`mosctl` 只从中读取 `MOSCTL_REPO_URL`、`MOSCTL_BRANCH`、`GH_PROXY`、`GH_MIRRORS` 和 `GEO_UPDATE_RETRY_DELAY`。面板用逐行 `key=value` 解析，不把文件交给 shell 执行。写入时拒绝引号、反斜杠、`$`、反引号、回车、换行和空字节，先写临时文件再替换，并保持权限 `600`。
 
 键说明：
 
@@ -135,7 +135,9 @@ python3 -m unittest discover -s tests
 - `WEB_PORT`：Web 面板端口，默认 `7840`。只在 `mosdns-web` 启动时读取，改完后执行 `systemctl restart mosdns-web`
 - `MOSCTL_REPO_URL`：面板升级和 `mosctl sync` 使用的仓库地址。在线同步和升级只接受 `https://github.com/<owner>/<repo>`（可带 `.git`）
 - `MOSCTL_BRANCH`：面板升级和 `mosctl sync` 使用的分支，默认 `main`
-- `GH_PROXY`：GitHub 代理前缀，只在直连 GitHub 失败后才使用；设为空字符串表示不走代理。键不存在时面板和 `mosctl` 使用 `https://gh-proxy.com/`
+- `GH_PROXY`：GitHub 代理前缀，直连失败后使用。`mosctl` 会把它放在 `GH_MIRRORS` 和 jsDelivr 前面；安装脚本和面板只使用这一个前缀。设为空字符串表示跳过这个前缀。键不存在时使用 `https://gh-proxy.com/`
+- `GH_MIRRORS`：`mosctl` 在 `GH_PROXY` 之后继续尝试的 GitHub 代理前缀，空格或逗号分隔，用于 Geo 更新和 `mosctl sync`。默认 `https://gh-proxy.com/ https://ghfast.top/`。设为空字符串表示不加这些前缀；键不存在时用默认列表。同名环境变量优先于 `.env`。这些前缀都失败后，`https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` 会改从 `https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>` 下载（Loyalsoldier 规则即 `https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/<file>`）
+- `GEO_UPDATE_RETRY_DELAY`：`mosctl update` 在 Geo 下载失败后、发通知前等待的秒数，默认 `180`，最大 `1800`。`0` 表示立即重试。mosdns 重启失败不会重试。同名环境变量优先于 `.env`
 - `RULE_SYNC_ENABLED`：`true` / `false`，把强制国内 / 强制国外规则的改动推送到其他面板。只有字符串 `true`（忽略大小写）算开启
 - `RULE_SYNC_TOKEN`：`/api/rule-sync` 校验用的共享密钥。请求头 `X-Mosdns-Sync-Token` 优先，其次才是 JSON 里的 `token`
 - `RULE_SYNC_PEERS`：其他 mosctl / mihomo 面板地址，用 `|` 分隔。面板保存时也接受换行或逗号，没有协议时补 `http://`
@@ -158,7 +160,7 @@ python3 -m unittest discover -s tests
 
 ## 通知
 
-在「运行维护 → 通知」填写站点名和 Webhook 地址并开启后，以下事件会发送通知（与 mihomo 面板格式一致，标题为 `图标 站点名 · 事件`，正文末尾附服务器时间；这条时间固定用东八区，和 crontab 使用的服务器本地时区不是同一套）：自动更新的内核 / 面板已更新、失败或回滚；Geo 规则更新失败与恢复；收到的同步规则未能应用与恢复；解析策略、规则或 `config.yaml` 修改后 mosdns 重启失败并回滚。反复出现的失败只在状态变化时通知，仍未恢复时最多每 3 天提醒一次（状态在 `/etc/mosdns/notify_state.json`）。发送记录写入 `/var/log/mosctl-notify.log`（只记主机名）。
+在「运行维护 → 通知」填写站点名和 Webhook 地址并开启后，以下事件会发送通知（与 mihomo 面板格式一致，标题为 `图标 站点名 · 事件`，正文末尾附服务器时间；这条时间固定用东八区，和 crontab 使用的服务器本地时区不是同一套）：自动更新的内核 / 面板已更新、失败或回滚；Geo 规则更新失败与恢复；收到的同步规则未能应用与恢复；解析策略、规则或 `config.yaml` 修改后 mosdns 重启失败并回滚。Geo 下载重试一次后仍然失败、但旧规则文件都还在且非空时，通知降级为警告「规则未更新，继续使用旧规则」，不当成严重故障。规则文件缺失，或已经下载成功但 mosdns 重启失败，仍发失败通知。反复出现的失败只在状态变化时通知，仍未恢复时最多每 3 天提醒一次（状态在 `/etc/mosdns/notify_state.json`）。发送记录写入 `/var/log/mosctl-notify.log`（只记主机名）。
 
 `mosctl update` 通过 `python3 /etc/mosdns/manager/notify_cli.py --key geo --event fail|ok ...` 上报 Geo 结果。通知失败不会改变 `mosctl` 的退出码。
 
@@ -273,7 +275,7 @@ python3 /etc/mosdns/manager/auto_update.py --manual
 
 **提示暂不支持当前架构。** `uname -m` 不在上一节的五类之中。面板升级内核时也会因为没有对应 zip 而取消。
 
-**GitHub 下载失败。** 安装、`mosctl` 和面板都是先直连，失败后再用 `GH_PROXY`。把 `GH_PROXY` 设成空字符串会禁止代理。`mosctl sync` 只接受 GitHub 仓库的 raw 地址。
+**GitHub 下载失败。** 安装脚本和面板先直连，失败后再用 `GH_PROXY`。`mosctl update` 和 `mosctl sync` 先直连，然后用 `GH_PROXY`，再按 `GH_MIRRORS`（默认 `https://gh-proxy.com/` 和 `https://ghfast.top/`）逐个试，最后把 `raw.githubusercontent.com` 换成 jsDelivr。`GH_PROXY` 为空只跳过这个前缀；`GH_MIRRORS` 为空则跳过额外前缀。Geo 下载全部失败后会等 `GEO_UPDATE_RETRY_DELAY` 秒（默认 180）再试一次，然后才发通知。旧规则文件还在且非空时，通知是警告「规则未更新，继续使用旧规则」，mosdns 继续用旧列表。`mosctl sync` 只接受 GitHub 仓库的 raw 地址。
 
 **重装后密码和 config.yaml 没变。** 这是默认行为：已有 `.env` 在 `MOSCTL_KEEP_ENV=1` 时保留；已有 `config.yaml` 只备份、不覆盖。要重写 `.env` 时执行 `MOSCTL_KEEP_ENV=0`，同时会换掉同步密钥和会话密钥。
 

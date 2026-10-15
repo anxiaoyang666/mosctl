@@ -88,7 +88,11 @@ cron
 
 若配置不再引用 `geoip_cn.txt`、`geosite_apple.txt`、`user_iot.txt`、`local-ptr.txt`，更新时删除这些旧文件。配置引用了但磁盘上没有的 `/etc/mosdns/rules/<名字>` 会先 `touch` 空文件，避免 mosdns 因缺文件起不来。下载用临时文件，成功后 `mv` 到目标。全部成功后 `systemctl restart mosdns`。
 
-直连失败时，`mosctl` 用 wget（20 秒超时、2 次尝试），面板用 Python 下载。代理前缀只拼到 `github.com`、`raw.githubusercontent.com`、`api.github.com`。
+`mosctl` 用 wget（20 秒超时、2 次尝试）。每个地址先直连，失败后按顺序试：`.env` 里的 `GH_PROXY`（没有这个键则是 `https://gh-proxy.com/`）、`GH_MIRRORS`（默认 `https://gh-proxy.com/` 和 `https://ghfast.top/`，和前面重复的跳过），最后把 `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` 换成 `https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>`。环境变量 `GH_MIRRORS` 优先于 `.env`。代理前缀只拼到 `github.com` 和 `raw.githubusercontent.com`。
+
+整次 Geo 下载仍失败时，`mosctl update` 等 `GEO_UPDATE_RETRY_DELAY` 秒（默认 180，最大 1800）再跑一遍，然后才发通知。`geosite_cn.txt` 和 `geosite_no_cn.txt`（以及配置仍引用的 `geoip_cn.txt`、`geosite_apple.txt`）都还在且非空时，通知是警告「规则未更新，继续使用旧规则」；退出码仍是 1，日志仍以 `===== 结果: 失败 =====` 结束。文件缺失，或已经下完但 `systemctl restart mosdns` 失败，仍发失败通知。重启失败不会先空等再试。
+
+面板和安装脚本的 GitHub 下载仍是直连失败后再用 `GH_PROXY` 这一个前缀，不走上面的镜像列表。
 
 ## 面板模块
 
@@ -117,7 +121,7 @@ cron
 | `GET/POST /api/notify-settings`、`POST /api/notify-test`、`GET /api/notify-log` | 通知。响应里只有 Webhook 主机名 |
 | `GET /api/logs` | `tail` `/var/log/mosdns.log`，可按 `lines` 和 `order=desc` |
 
-`auto_update.py` 只编排：读设置、选内核版本、选面板提交、调用 `app.py` 里的安装函数、写状态和日志。`notify_cli.py` 把 shell 的 Geo 结果转成 `notify_failure` / `notify_recovery`，`--key` 目前只接受 `geo`。
+`auto_update.py` 只编排：读设置、选内核版本、选面板提交、调用 `app.py` 里的安装函数、写状态和日志。`notify_cli.py` 把 shell 的 Geo 结果转成 `notify_failure` / `notify_recovery`。`--event warn` 仍走 `notify_failure`，级别是 warning。`--key` 目前只接受 `geo`。
 
 前端没有构建步骤。`index.html` 用 `data-view` 切换五个视图，请求都带 `X-Requested-With: XMLHttpRequest`。页面上的 `mosctl-version` 和 `/api/status` 的 `panel_version` 不一致时，说明这个标签页还是升级前的脚本。
 

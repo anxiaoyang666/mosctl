@@ -26,7 +26,7 @@ The Chinese maintainer guide is [README.zh-CN.md](README.zh-CN.md), with [docs/A
 | Piece | What the repo uses |
 | --- | --- |
 | DNS core | Linux release zips from [IrineSistiana/mosdns](https://github.com/IrineSistiana/mosdns), installed to `/usr/local/bin/mosdns`. This repo does not build mosdns. |
-| Web panel | Python 3 and the distro package `python3-flask`. Entry point: `remote-root/etc/mosdns/manager/app.py`. The version constant is `PANEL_VERSION` (currently `0.3.50` in this tree). |
+| Web panel | Python 3 and the distro package `python3-flask`. Entry point: `remote-root/etc/mosdns/manager/app.py`. The version constant is `PANEL_VERSION` (currently `0.3.51` in this tree). |
 | CLI | Bash: `install.sh` and `remote-root/usr/local/bin/mosctl`. |
 | Services | systemd units `mosdns.service`, `mosdns-web.service`, `mosdns-rescue.service`. |
 | Schedules | root's crontab, one line for Geo updates and one for auto-update. |
@@ -68,7 +68,7 @@ Available variables:
 - `WEB_USER`: Web login username, default `admin`
 - `WEB_SECRET`: Web login password, randomly generated when omitted
 - `MOSDNS_VERSION`: mosdns core version, default `latest`. Any other value is a release tag such as `v5.3.3`. Not written to `.env`
-- `GH_PROXY`: GitHub proxy prefix, default `https://gh-proxy.com/`
+- `GH_PROXY`: GitHub proxy prefix, default `https://gh-proxy.com/`. The installer uses only this prefix. `mosctl` tries more mirrors afterwards; see `GH_MIRRORS` below
 - `MOSCTL_KEEP_ENV`: default `1`. Keeps an existing `.env`. Set `0` to rewrite it, which replaces the password and the sync token
 
 Running `bash install.sh` from a checkout uses the local `remote-root/` and does not clone.
@@ -106,7 +106,7 @@ There is no compile step, container image, or CI release workflow. Shipping a ch
 
 ## Configuration File (`/etc/mosdns/.env`)
 
-The installer writes `/etc/mosdns/.env` (mode `600`). The Web panel reads and updates it; `mosctl` only reads `MOSCTL_REPO_URL`, `MOSCTL_BRANCH` and `GH_PROXY` from it. Values are parsed as text, not sourced as shell. Writes reject quotes, backslashes, `$`, backticks, and newlines, and replace the file atomically.
+The installer writes `/etc/mosdns/.env` (mode `600`). The Web panel reads and updates it; `mosctl` only reads `MOSCTL_REPO_URL`, `MOSCTL_BRANCH`, `GH_PROXY`, `GH_MIRRORS` and `GEO_UPDATE_RETRY_DELAY` from it. Values are parsed as text, not sourced as shell. Writes reject quotes, backslashes, `$`, backticks, and newlines, and replace the file atomically.
 
 Keys:
 
@@ -116,7 +116,9 @@ Keys:
 - `WEB_PORT`: Web panel port, default `7840`. Read when `mosdns-web` starts; run `systemctl restart mosdns-web` after changing it
 - `MOSCTL_REPO_URL`: repository used by the panel upgrade and `mosctl sync`. Online sync and upgrade accept only `https://github.com/<owner>/<repo>` (optional `.git`)
 - `MOSCTL_BRANCH`: branch used by the panel upgrade and `mosctl sync`, default `main`
-- `GH_PROXY`: GitHub proxy prefix tried only after a direct GitHub download fails; set it to an empty string to never use a proxy. A missing key falls back to `https://gh-proxy.com/`
+- `GH_PROXY`: GitHub proxy prefix tried after a direct download fails. `mosctl` tries this prefix first, then `GH_MIRRORS`, then jsDelivr. The installer and the panel try only this prefix. Set it to an empty string to skip this prefix. A missing key falls back to `https://gh-proxy.com/`
+- `GH_MIRRORS`: extra GitHub proxy prefixes `mosctl` tries after `GH_PROXY` for Geo updates and `mosctl sync`, separated by spaces or commas. Default `https://gh-proxy.com/ https://ghfast.top/`. An empty value adds none. A missing key uses the default. The environment variable overrides `.env`. After those prefixes, `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` is fetched from `https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>` (Loyalsoldier lists: `https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/<file>`)
+- `GEO_UPDATE_RETRY_DELAY`: seconds `mosctl update` waits before retrying a failed Geo download once. Default `180`, maximum `1800`. `0` retries immediately. A mosdns restart failure is not retried. The environment variable overrides `.env`
 - `RULE_SYNC_ENABLED`: `true` / `false`, push force-cn / force-nocn rule changes to other panels. Only the string `true` (any case) enables it
 - `RULE_SYNC_TOKEN`: shared secret that `/api/rule-sync` checks. The `X-Mosdns-Sync-Token` header wins over a JSON `token`
 - `RULE_SYNC_PEERS`: other mosctl / mihomo panel URLs, separated by `|`. The panel also accepts newlines or commas and prefixes `http://` when the scheme is missing
@@ -135,7 +137,7 @@ On startup and whenever its settings are saved, the panel keeps one crontab line
 
 ## Notifications
 
-After setting a site name and webhook under 运行维护 → 通知 and enabling it, the panel notifies (same format as the mihomo panel: title `icon site · event`, server time appended to the body; that timestamp is fixed at UTC+8, which can differ from the server timezone used by cron) when auto-update installs, fails or rolls back the core or the panel; when the Geo update fails or recovers; when received rule-sync content cannot be applied or recovers; and when a policy, rule, or `config.yaml` change makes mosdns fail to restart and is rolled back. Recurring failures only notify on state changes, with a reminder at most every 3 days while still failing (state in `/etc/mosdns/notify_state.json`). Sends are logged to `/var/log/mosctl-notify.log` (host only).
+After setting a site name and webhook under 运行维护 → 通知 and enabling it, the panel notifies (same format as the mihomo panel: title `icon site · event`, server time appended to the body; that timestamp is fixed at UTC+8, which can differ from the server timezone used by cron) when auto-update installs, fails or rolls back the core or the panel; when the Geo update fails or recovers; when received rule-sync content cannot be applied or recovers; and when a policy, rule, or `config.yaml` change makes mosdns fail to restart and is rolled back. A Geo download that still fails after one retry, while the previous rule files are present and non-empty, sends a warning titled `规则未更新，继续使用旧规则` instead of a failure. A missing rule file, or a download that succeeded but left mosdns unable to restart, is still a failure. Recurring failures only notify on state changes, with a reminder at most every 3 days while still failing (state in `/etc/mosdns/notify_state.json`). Sends are logged to `/var/log/mosctl-notify.log` (host only).
 
 `mosctl update` reports Geo results with `python3 /etc/mosdns/manager/notify_cli.py --key geo --event fail|ok ...`. A notification error does not change `mosctl`'s exit code.
 
@@ -220,7 +222,7 @@ With no arguments, `mosctl` opens the menu: service control, sync, DNS settings,
 
 **Unsupported architecture.** `uname -m` is outside the five families listed above. Core upgrade refuses the same machines.
 
-**GitHub downloads fail.** Install, `mosctl`, and the panel try the direct URL first, then `GH_PROXY`. An empty `GH_PROXY` disables the proxy. `mosctl sync` only accepts a GitHub raw URL.
+**GitHub downloads fail.** The installer and the panel try the direct URL, then `GH_PROXY`. `mosctl update` and `mosctl sync` try the direct URL, then `GH_PROXY`, then each prefix in `GH_MIRRORS` (default `https://gh-proxy.com/` and `https://ghfast.top/`), then jsDelivr for `raw.githubusercontent.com` files. An empty `GH_PROXY` skips that prefix. An empty `GH_MIRRORS` skips the extra prefixes. A failed Geo download waits `GEO_UPDATE_RETRY_DELAY` seconds (default 180) and tries once more before notifying. If the previous rule files are still non-empty, the notice is a warning, `规则未更新，继续使用旧规则`, and mosdns keeps using them. `mosctl sync` only accepts a GitHub raw URL.
 
 **Reinstall kept the password and config.yaml.** An existing `.env` is kept while `MOSCTL_KEEP_ENV` is `1`. An existing `config.yaml` is backed up and left in place. `MOSCTL_KEEP_ENV=0` rewrites `.env` and replaces the sync token and session secret.
 

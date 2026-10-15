@@ -82,6 +82,10 @@ mosctl update
 
 失败时先看 `/var/log/mosctl-update.log` 里最后一个块。常见原因是 GitHub raw 下载失败，或下载成功但 `systemctl restart mosdns` 失败。下载失败不会用半截文件替换原列表。
 
+每个地址先直连，再试 `GH_PROXY`，然后试 `GH_MIRRORS`（没写这个键时是 `https://gh-proxy.com/` 和 `https://ghfast.top/`），最后试 jsDelivr（`https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>`）。同名环境变量优先于 `.env`。想只保留自己的代理前缀时，把 `GH_MIRRORS` 写成空字符串；jsDelivr 仍会作为 raw 文件的最后一跳。
+
+下载全部失败后会等 `GEO_UPDATE_RETRY_DELAY` 秒（默认 180）再自动试一次，然后才发通知。测试或手工排查可以 `GEO_UPDATE_RETRY_DELAY=0 mosctl update`，立即重试、不必等几分钟。旧的 `geosite_cn.txt` / `geosite_no_cn.txt` 还在且非空时，通知是警告「规则未更新，继续使用旧规则」，mosdns 继续用磁盘上的旧列表；日志里的 `===== 结果: 失败 =====` 和退出码 1 不变。规则文件缺失，或重启失败，仍按严重故障发通知。面板上的「立即更新」最多等 1200 秒，用来盖住这次重试。
+
 ## 自动更新
 
 查看而不安装：

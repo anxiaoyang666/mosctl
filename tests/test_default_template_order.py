@@ -35,6 +35,10 @@ class DefaultTemplateOrderTest(unittest.TestCase):
         self.assertIn('"/etc/mosdns/rules/force-nocn.txt"', plugin_block(text, "force_no_cn"))
         self.assertNotIn("force-cn.txt", plugin_block(text, "geosite_cn"))
         self.assertNotIn("force-nocn.txt", plugin_block(text, "geosite_no_cn"))
+        # 强制家宽在 DNS 上和强制国外一样，挂在同一个 domain_set 里
+        self.assertIn('"/etc/mosdns/rules/force-home.txt"', plugin_block(text, "force_no_cn"))
+        self.assertNotIn("force-home.txt", plugin_block(text, "force_cn"))
+        self.assertNotIn("force-home.txt", plugin_block(text, "geosite_no_cn"))
 
     def test_force_rules_run_before_regular_geosite_rules(self):
         text = read_template()

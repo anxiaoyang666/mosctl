@@ -37,7 +37,7 @@ class HardeningContractTest(unittest.TestCase):
         self.assertNotIn("rf'\\g<1>\"{", text)
         self.assertNotIn('rf"\\g<1>{', text)
         self.assertIn('restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")', text)
-        self.assertIn('restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")', text)
+        self.assertIn('restart_or_rollback(rollback_list(rollback), "规则已保存并重启 mosdns", "规则已保存")', text)
 
     def test_backups_are_namespaced_by_prefix(self):
         text = read(APP)

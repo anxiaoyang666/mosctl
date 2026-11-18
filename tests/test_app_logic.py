@@ -339,6 +339,99 @@ class AppLogicTest(unittest.TestCase):
         self.assertEqual((rules_dir / "hosts.txt").read_text(encoding="utf-8"), "nas.lan 10.0.0.1\n")
         self.assertEqual(rollback, (None, str(rules_dir / "hosts.txt")))
 
+    # --- 强制家宽 ---
+
+    def _write_config_with_nocn(self, rules_dir, quote='"'):
+        config = self._write_config(rules_dir) + (
+            f'  - tag: force_no_cn\n    type: domain_set\n    args:\n      files:\n        - {quote}{rules_dir}/force-nocn.txt{quote}\n'
+            '  - tag: main_sequence\n    type: sequence\n    args:\n      - exec: accept\n'
+        )
+        Path(self.app.CONFIG_FILE).write_text(config, encoding="utf-8")
+        return config
+
+    def test_force_home_reference_is_added_next_to_force_nocn(self):
+        rules_dir = str(Path(self.app.RULE_FILES["force-home"]["path"]).parent)
+        for quote in ('"', "'", ""):
+            config = self._write_config_with_nocn(rules_dir, quote)
+            text = self.app.force_home_config_text(config)
+            self.assertIn(
+                f"        - {quote}{rules_dir}/force-nocn.txt{quote}\n        - {quote}{rules_dir}/force-home.txt{quote}\n",
+                text,
+            )
+            self.assertEqual(self.app.force_home_config_text(text), text, "已经引用时原样返回")
+        self.assertIsNone(self.app.force_home_config_text(self._write_config(rules_dir)))
+
+    def test_save_force_home_patches_old_config_and_returns_both_rollbacks(self):
+        rules_dir = Path(self.app.RULE_FILES["force-home"]["path"]).parent
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("hosts.txt", "force-cn.txt", "force-nocn.txt"):
+            (rules_dir / name).write_text("", encoding="utf-8")
+        original = self._write_config_with_nocn(str(rules_dir))
+        seen = {}
+
+        def fake_config_starts(path, wait_seconds=3.0):
+            seen["text"] = Path(path).read_text(encoding="utf-8")
+            return True, "ok"
+
+        self.app.config_starts = fake_config_starts
+        ok, message, rollback = self.app.save_rule_content("force-home", "ourbits.club\n")
+        self.assertTrue(ok, message)
+        # 沙箱用的是补好引用的配置，候选文件在临时目录
+        self.assertRegex(seen["text"], r'- "[^"]+/rules/force-home\.txt"')
+        self.assertNotIn(f'"{rules_dir}/force-home.txt"', seen["text"])
+        self.assertEqual((rules_dir / "force-home.txt").read_text(encoding="utf-8"), "ourbits.club\n")
+        config = Path(self.app.CONFIG_FILE).read_text(encoding="utf-8")
+        self.assertIn(f'- "{rules_dir}/force-home.txt"', config)
+        self.assertIsInstance(rollback, list)
+        self.assertEqual(rollback[0], (None, str(rules_dir / "force-home.txt")))
+        self.assertEqual(rollback[1][1], self.app.CONFIG_FILE)
+        self.assertEqual(Path(rollback[1][0]).read_text(encoding="utf-8"), original)
+        self.assertEqual(self.app.rollback_list(rollback), rollback)
+        self.assertEqual(self.app.rollback_list((None, "x")), [(None, "x")])
+        self.assertEqual(self.app.rollback_list(None), [])
+
+        # 第二次保存：配置已引用，只写规则文件
+        ok, message, rollback = self.app.save_rule_content("force-home", "ourbits.club\nhdsky.me\n")
+        self.assertTrue(ok, message)
+        self.assertIsInstance(rollback, tuple)
+        self.assertEqual(Path(self.app.CONFIG_FILE).read_text(encoding="utf-8"), config)
+
+    def test_save_force_home_without_force_nocn_reference_is_refused(self):
+        rules_dir = Path(self.app.RULE_FILES["force-home"]["path"]).parent
+        original = self._write_config(str(rules_dir))
+        self.app.config_starts = lambda path, wait_seconds=3.0: self.fail("找不到挂载点时不该起沙箱")
+        ok, message, rollback = self.app.save_rule_content("force-home", "ourbits.club\n")
+        self.assertFalse(ok)
+        self.assertIn("迁移到最新模板", message)
+        self.assertIsNone(rollback)
+        self.assertFalse((rules_dir / "force-home.txt").exists())
+        self.assertEqual(Path(self.app.CONFIG_FILE).read_text(encoding="utf-8"), original)
+
+    def test_force_rule_conflict_mentions_other_list(self):
+        rules_dir = Path(self.app.RULE_FILES["force-home"]["path"]).parent
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        (rules_dir / "force-cn.txt").write_text("qq.com\n", encoding="utf-8")
+        (rules_dir / "force-nocn.txt").write_text("openai.com\n", encoding="utf-8")
+        (rules_dir / "force-home.txt").write_text("ourbits.club\n", encoding="utf-8")
+        self.assertEqual(self.app.force_rule_conflict("force-home", "ourbits.club\nhdsky.me\n"), "")
+        message = self.app.force_rule_conflict("force-home", "QQ.com\n")
+        self.assertIn("qq.com", message)
+        self.assertIn("强制国内", message)
+        message = self.app.force_rule_conflict("force-nocn", "openai.com\nourbits.club # 注释\n")
+        self.assertIn("ourbits.club", message)
+        self.assertIn("强制国外", message)
+        self.assertEqual(self.app.force_rule_conflict("hosts", "ourbits.club 1.1.1.1\n"), "")
+
+    def test_ensure_local_rule_files_creates_missing_empty_files(self):
+        home = Path(self.app.RULE_FILES["force-home"]["path"])
+        nocn = Path(self.app.RULE_FILES["force-nocn"]["path"])
+        nocn.parent.mkdir(parents=True, exist_ok=True)
+        nocn.write_text("openai.com\n", encoding="utf-8")
+        self.assertFalse(home.exists())
+        self.app.ensure_local_rule_files()
+        self.assertEqual(home.read_text(encoding="utf-8"), "")
+        self.assertEqual(nocn.read_text(encoding="utf-8"), "openai.com\n", "已有文件不能被清空")
+
     def test_update_config_values_validates_before_writing_and_restarting(self):
         original = self._write_config(f"{self.tmp.name}/rules")
         calls = []

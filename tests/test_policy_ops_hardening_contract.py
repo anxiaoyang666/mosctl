@@ -58,7 +58,7 @@ class PolicyHardeningContractTest(unittest.TestCase):
         self.assertRegex(text, r"def update_config_values[\s\S]*?config_text_starts\(new_text\)[\s\S]*?write_config_text\(new_text\)")
         self.assertRegex(text, r"def api_config[\s\S]*?config_text_starts\(content\)[\s\S]*?write_config_text\(content\)")
         self.assertRegex(text, r"def restore_backup[\s\S]*?config_starts\(source\)[\s\S]*?shutil\.copy2\(source, CONFIG_FILE\)")
-        self.assertRegex(text, r"def save_rule_content[\s\S]*?rule_content_starts\(rule_id, content\)[\s\S]*?os\.replace\(tmp_file, path\)")
+        self.assertRegex(text, r"def save_rule_content[\s\S]*?rule_content_starts\(rule_id, content, new_config\)[\s\S]*?os\.replace\(tmp_file, path\)")
         # 第二道防线仍在
         self.assertIn('restart_or_rollback([(backup, CONFIG_FILE)], "配置已保存并重启 mosdns", "配置已保存")', text)
 

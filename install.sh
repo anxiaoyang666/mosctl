@@ -167,7 +167,7 @@ copy_payload() {
     cp -a "$payload/etc/mosdns/rules/." "$INSTALL_DIR/rules/"
     rm -f "$INSTALL_DIR"/rules/*.save "$INSTALL_DIR"/rules/*.save.*
   fi
-  touch "$INSTALL_DIR/rules/force-cn.txt" "$INSTALL_DIR/rules/force-nocn.txt" "$INSTALL_DIR/rules/hosts.txt"
+  touch "$INSTALL_DIR/rules/force-cn.txt" "$INSTALL_DIR/rules/force-nocn.txt" "$INSTALL_DIR/rules/force-home.txt" "$INSTALL_DIR/rules/hosts.txt"
 
   install -m 0644 "$payload/etc/systemd/system/mosdns.service" /etc/systemd/system/mosdns.service
   install -m 0644 "$payload/etc/systemd/system/mosdns-rescue.service" /etc/systemd/system/mosdns-rescue.service

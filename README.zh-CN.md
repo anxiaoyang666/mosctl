@@ -11,9 +11,9 @@ Mosctl 是一个 mosdns 安装、配置和 Web 管理面板工具。它把 [mosd
 - 一键安装 mosdns 内核、systemd 服务和 Web 面板，并打印访问地址、用户名和密码。
 - Web 面板五个页面：态势总览、解析策略、运行维护、高级配置、系统控制。
 - 维护国内主上游、备用国内上游、国外上游和缓存 TTL。配置里用行尾注释 `TAG_LOCAL`、`TAG_LOCAL_BACKUP`、`TAG_REMOTE` 标记这三项。
-- 编辑三类本机规则：强制国内（`force-cn.txt`）、强制国外（`force-nocn.txt`）、自定义 Hosts（`hosts.txt`）。保存前会做格式检查，并用 mosdns 沙盒试启动，失败则不写入。
+- 编辑四类本机规则：强制国内（`force-cn.txt`）、强制国外（`force-nocn.txt`）、强制家宽（`force-home.txt`）、自定义 Hosts（`hosts.txt`）。强制家宽在 DNS 上和强制国外一样走国外上游，区别只在同步到 mihomo 后走「🏠 家宽」策略组。保存前会做格式检查，并用 mosdns 沙盒试启动，失败则不写入。
 - 从 Loyalsoldier 规则列表更新 `geosite_cn.txt`、`geosite_no_cn.txt`，可手动执行，也可写入 crontab。
-- 把强制国内 / 强制国外规则推送到其他 mosctl 或 mihomo 面板的 `/api/rule-sync`。
+- 把强制国内 / 强制国外 / 强制家宽规则推送到其他 mosctl 或 mihomo 面板的 `/api/rule-sync`。
 - 升级 mosdns 内核和 Mosctl 面板。内核替换前用新二进制在沙盒里跑当前配置，替换后做健康检查，不通过则回滚。
 - 每天按 crontab 自动更新内核和面板（可用 `--dry-run`、`--only`、`--manual`）。
 - Webhook 通知：自动更新成功、失败或回滚；Geo 更新失败与恢复；收到的同步规则未能应用与恢复；解析策略或配置改动导致 mosdns 重启失败并回滚。
@@ -26,7 +26,7 @@ Mosctl 是一个 mosdns 安装、配置和 Web 管理面板工具。它把 [mosd
 | 部分 | 实现 |
 | --- | --- |
 | DNS 内核 | 上游 [IrineSistiana/mosdns](https://github.com/IrineSistiana/mosdns) 的 Linux 发行包，安装到 `/usr/local/bin/mosdns`。本仓库不编译内核。 |
-| Web 面板 | Python 3 标准库 + 发行版软件包 `python3-flask`。入口是 `remote-root/etc/mosdns/manager/app.py`，版本号常量 `PANEL_VERSION`（当前仓库为 `0.3.51`）。 |
+| Web 面板 | Python 3 标准库 + 发行版软件包 `python3-flask`。入口是 `remote-root/etc/mosdns/manager/app.py`，版本号常量 `PANEL_VERSION`（当前仓库为 `0.3.52`）。 |
 | 命令行 | Bash：`install.sh` 与 `remote-root/usr/local/bin/mosctl`。 |
 | 服务 | systemd：`mosdns.service`、`mosdns-web.service`、`mosdns-rescue.service`。 |
 | 定时任务 | 当前用户的 crontab（安装时是 root）。Geo 更新和自动更新各占一行。 |
@@ -138,7 +138,7 @@ python3 -m unittest discover -s tests
 - `GH_PROXY`：GitHub 代理前缀，直连失败后使用。`mosctl` 会把它放在 `GH_MIRRORS` 和 jsDelivr 前面；安装脚本和面板只使用这一个前缀。设为空字符串表示跳过这个前缀。键不存在时使用 `https://gh-proxy.com/`
 - `GH_MIRRORS`：`mosctl` 在 `GH_PROXY` 之后继续尝试的 GitHub 代理前缀，空格或逗号分隔，用于 Geo 更新和 `mosctl sync`。默认 `https://gh-proxy.com/ https://ghfast.top/`。设为空字符串表示不加这些前缀；键不存在时用默认列表。同名环境变量优先于 `.env`。这些前缀都失败后，`https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` 会改从 `https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>` 下载（Loyalsoldier 规则即 `https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/<file>`）
 - `GEO_UPDATE_RETRY_DELAY`：`mosctl update` 在 Geo 下载失败后、发通知前等待的秒数，默认 `180`，最大 `1800`。`0` 表示立即重试。mosdns 重启失败不会重试。同名环境变量优先于 `.env`
-- `RULE_SYNC_ENABLED`：`true` / `false`，把强制国内 / 强制国外规则的改动推送到其他面板。只有字符串 `true`（忽略大小写）算开启
+- `RULE_SYNC_ENABLED`：`true` / `false`，把强制国内 / 强制国外 / 强制家宽规则的改动推送到其他面板。只有字符串 `true`（忽略大小写）算开启
 - `RULE_SYNC_TOKEN`：`/api/rule-sync` 校验用的共享密钥。请求头 `X-Mosdns-Sync-Token` 优先，其次才是 JSON 里的 `token`
 - `RULE_SYNC_PEERS`：其他 mosctl / mihomo 面板地址，用 `|` 分隔。面板保存时也接受换行或逗号，没有协议时补 `http://`
 - `BACKUP_KEEP_COUNT`：配置备份保留数量（3–200），默认 `20`。内核备份固定保留 3 个，面板目录备份固定保留 3 份，都不受这个数控制
@@ -166,7 +166,7 @@ python3 -m unittest discover -s tests
 
 ## 规则同步
 
-开启规则同步后，保存强制国内 / 强制国外规则时会推送到 `RULE_SYNC_PEERS` 里的每个地址。Hosts 不同步。推送在后台线程里进行，页面用返回的任务 id 轮询 `/api/rule-sync-jobs/<id>`。本机地址会被跳过。对端返回「操作进行中」或 HTTP 409 时，间隔 3 秒重试，最多 3 次。
+开启规则同步后，保存强制国内 / 强制国外 / 强制家宽规则时会推送到 `RULE_SYNC_PEERS` 里的每个地址。Hosts 不同步。推送在后台线程里进行，页面用返回的任务 id 轮询 `/api/rule-sync-jobs/<id>`。本机地址会被跳过。对端返回「操作进行中」或 HTTP 409 时，间隔 3 秒重试，最多 3 次。
 
 节点地址默认是明文 `http://`，同步密钥通过请求头明文传输：同步密钥会以明文发送，建议仅在可信内网使用，或者给面板套上 HTTPS。面板里只要有节点不是 `https://`，也会显示同样的提示。
 
@@ -200,7 +200,7 @@ python3 -m unittest discover -s tests
         ├── systemd/system/    # mosdns、mosdns-web、mosdns-rescue
         └── mosdns/
             ├── templates/default.yaml
-            ├── rules/         # 空的 force-cn / force-nocn / hosts，以及随仓库附带的 geosite 列表
+            ├── rules/         # 空的 force-cn / force-nocn / force-home / hosts，以及随仓库附带的 geosite 列表
             └── manager/
                 ├── app.py
                 ├── auto_update.py
@@ -227,7 +227,7 @@ python3 -m unittest discover -s tests
 | `/var/log/mosctl-auto-update.log` | 自动更新日志 |
 | `/var/log/mosctl-notify.log` | 通知发送记录 |
 
-`remote-root/etc/mosdns/rules/geosite_cn.txt` 和 `geosite_no_cn.txt` 是仓库里的初始列表。安装结束时会跑 `mosctl update`，成功后这两份文件被 Loyalsoldier 的列表替换。`force-cn.txt`、`force-nocn.txt`、`hosts.txt` 在仓库里是空文件。
+`remote-root/etc/mosdns/rules/geosite_cn.txt` 和 `geosite_no_cn.txt` 是仓库里的初始列表。安装结束时会跑 `mosctl update`，成功后这两份文件被 Loyalsoldier 的列表替换。`force-cn.txt`、`force-nocn.txt`、`force-home.txt`、`hosts.txt` 在仓库里是空文件。
 
 ## Web 面板
 

@@ -19,7 +19,7 @@ class MosctlCrossPanelRuleSyncContractTest(unittest.TestCase):
     def test_sync_protocol_matches_mihomo_rule_ids(self):
         text = app_source()
 
-        self.assertIn('SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}', text)
+        self.assertIn('SYNCABLE_RULE_IDS = {"force-cn", "force-home", "force-nocn"}', text)
         self.assertIn('/api/rule-sync', text)
         self.assertIn('"rules": {rule_id: content}', text)
         self.assertIn("apply_synced_rules", text)

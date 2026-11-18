@@ -46,7 +46,7 @@ RULE_BACKUP_PREFIX = "rule-"
 KERNEL_BACKUP_PREFIX = "mosdns-bin."
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d))(.*)$")
-SYNCABLE_RULE_IDS = {"force-cn", "force-nocn"}
+SYNCABLE_RULE_IDS = {"force-cn", "force-home", "force-nocn"}
 MOSDNS_RELEASE_BASE = "https://github.com/IrineSistiana/mosdns/releases/latest/download"
 MOSDNS_RELEASE_API = "https://api.github.com/repos/IrineSistiana/mosdns/releases/latest"
 GEO_UPDATE_COMMAND = f"{MOSCTL} update"
@@ -57,7 +57,7 @@ DEFAULT_MOSCTL_REPO_URL = "https://github.com/anxiaoyang666/mosctl.git"
 DEFAULT_MOSCTL_BRANCH = "main"
 # .env 里没有 GH_PROXY 时沿用这个默认值；写成空字符串表示不走代理
 DEFAULT_GH_PROXY = "https://gh-proxy.com/"
-PANEL_VERSION = "0.3.51"
+PANEL_VERSION = "0.3.52"
 PANEL_BACKUP_KEEP_COUNT = 3
 # 登录态保留 30 天；有登录限速和改密码轮换密钥兜底，不需要一年
 SESSION_LIFETIME_DAYS = 30
@@ -127,6 +127,17 @@ RULE_FILES = {
             "openai.com",
             "github.com",
             "google.com",
+        ],
+    },
+    "force-home": {
+        "label": "强制家宽",
+        "path": f"{MOSDNS_DIR}/rules/force-home.txt",
+        "summary": "DNS 和强制国外一样走国外上游（交给 mihomo 的 fake-ip）；同步到 mihomo 后这些域名走「🏠 家宽」策略组，适合要住宅 IP 才过得了验证的网站，比如套了 Cloudflare 强制验证的 PT 站。",
+        "format": "每行一个域名，不能有空格；写主域名即可（默认连同子域名一起匹配），可以用 # 写注释。也可以加 full:（只匹配这个域名）、keyword:、regexp: 前缀；同步到 mihomo 时 keyword:/regexp: 不生效，full: 会连同子域名一起匹配。同一个域名不要同时写在强制国内或强制国外里。",
+        "examples": [
+            "# 这些域名走家宽",
+            "ourbits.club",
+            "hdsky.me",
         ],
     },
     "hosts": {
@@ -1336,13 +1347,14 @@ def config_text_starts(content):
             pass
 
 
-def rule_content_starts(rule_id, content):
+def rule_content_starts(rule_id, content, config_text=None):
     # 规则文件的校验：把当前 config.yaml 里指向 rules/ 的路径改到临时目录，
     # 临时目录里放候选规则文件，其他规则文件用符号链接指回原文件，再起一个沙箱 mosdns
     meta = RULE_FILES.get(rule_id)
     if not meta:
         return False, "未知规则文件"
-    config_text = read_config_text()
+    if config_text is None:
+        config_text = read_config_text()
     if not config_text.strip():
         return False, "配置文件不存在，无法校验规则"
     rules_dir = os.path.dirname(meta["path"])
@@ -1446,10 +1458,26 @@ def migrate_to_current_template():
     return {"success": ok, "message": message, **details}
 
 
+def ensure_local_rule_files():
+    """面板升级不碰 rules/：新版本加的规则文件（如 force-home.txt）在老机器上不存在。
+    新模板引用了它，缺文件 mosdns 起不来，沙箱校验也过不去，所以先补成空文件。"""
+    for meta in RULE_FILES.values():
+        path = meta["path"]
+        if os.path.exists(path):
+            continue
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8"):
+                pass
+        except OSError:
+            pass
+
+
 def restore_default_template_details():
     details = {"sandbox_ok": False, "carried": {}}
     if not os.path.exists(DEFAULT_TEMPLATE_FILE):
         return False, "内置默认模板不存在", details
+    ensure_local_rule_files()
 
     current = parse_config_values()
     with open(DEFAULT_TEMPLATE_FILE, "r", encoding="utf-8") as file:
@@ -3020,7 +3048,7 @@ def finish_panel_auto_update():
 
 def panel_startup_tasks():
     # 只在 mosdns-web 真正启动时调用（__main__），import（auto_update.py、测试）时不碰 crontab
-    for task in (finish_panel_auto_update, write_auto_update_cron):
+    for task in (ensure_local_rule_files, finish_panel_auto_update, write_auto_update_cron):
         try:
             task()
         except Exception as exc:
@@ -3236,9 +3264,63 @@ def domain_rule_error(content):
 def rule_content_error(rule_id, content):
     if rule_id == "hosts":
         return hosts_rule_error(content)
-    if rule_id in ("force-cn", "force-nocn"):
+    if rule_id in ("force-cn", "force-home", "force-nocn"):
         return domain_rule_error(content)
     return None
+
+
+FORCE_HOME_UNREFERENCED_MESSAGE = "DNS 配置里找不到 force-nocn.txt 的引用，没法给强制家宽挂上。请先在配置页「迁移到最新模板」，未保存"
+
+
+def force_home_config_text(config_text):
+    """强制家宽在 DNS 上和强制国外一样处理：force-home.txt 挂在 force_no_cn 的文件列表里。
+
+    已经引用就原样返回；旧配置（模板 v4 及以前）没有这一行，就紧跟 force-nocn.txt 那行补一行，
+    缩进和引号沿用那一行。找不到 force-nocn.txt 那行时返回 None，调用方不保存。"""
+    home = RULE_FILES["force-home"]["path"]
+    nocn = RULE_FILES["force-nocn"]["path"]
+    text = str(config_text or "")
+    if home in text:
+        return text
+    match = re.search(r'(?m)^([ \t]*-[ \t]*)(["\']?)' + re.escape(nocn) + r'\2[ \t]*$', text)
+    if not match:
+        return None
+    line = f"{match.group(1)}{match.group(2)}{home}{match.group(2)}"
+    return text[:match.end()] + "\n" + line + text[match.end():]
+
+
+def read_rule_file_text(rule_id):
+    try:
+        with open(RULE_FILES[rule_id]["path"], "r", encoding="utf-8") as file:
+            return file.read()
+    except (KeyError, OSError):
+        return ""
+
+
+def force_rule_conflict(rule_id, content):
+    """强制家宽和强制国内/国外写了同一个域名时返回提示。排在前面的规则先命中，后面那条等于白写。"""
+    ids = ("force-cn", "force-home", "force-nocn")
+    if rule_id not in ids:
+        return ""
+    lists = {rid: (content if rid == rule_id else read_rule_file_text(rid)) for rid in ids}
+    home = rule_entry_set(lists["force-home"])
+    if not home:
+        return ""
+    for other in ("force-cn", "force-nocn"):
+        both = sorted(home & rule_entry_set(lists[other]))
+        if both:
+            shown = "、".join(both[:5]) + ("等" if len(both) > 5 else "")
+            return f"{shown} 同时写在强制家宽和{RULE_FILES[other]['label']}里，请只留一处，未保存"
+    return ""
+
+
+def rollback_list(rollback):
+    """save_rule_content 的第三项：一般是一个 (备份, 文件)，强制家宽顺带改了配置时是这样的列表。"""
+    if not rollback:
+        return []
+    if isinstance(rollback, list):
+        return rollback
+    return [rollback]
 
 
 RULES_UNCHANGED_MESSAGE = "规则内容没有变化，未重启"
@@ -3284,7 +3366,16 @@ def save_rule_content(rule_id, content):
     format_error = rule_content_error(rule_id, content)
     if format_error:
         return False, format_error, None
-    ok, message = rule_content_starts(rule_id, content)
+    new_config = None
+    if rule_id == "force-home":
+        current_config = read_config_text()
+        candidate = force_home_config_text(current_config)
+        if candidate is None:
+            return False, FORCE_HOME_UNREFERENCED_MESSAGE, None
+        if candidate != current_config:
+            new_config = candidate
+    # 要补配置引用时，沙箱用补好的配置校验，规则文件和配置一起过
+    ok, message = rule_content_starts(rule_id, content, new_config)
     if not ok:
         return False, "规则校验失败，未保存：\n" + message, None
 
@@ -3295,7 +3386,11 @@ def save_rule_content(rule_id, content):
     with open(tmp_file, "w", encoding="utf-8") as file:
         file.write(content)
     os.replace(tmp_file, path)
-    return True, "规则已保存", (backup, path)
+    if new_config is None:
+        return True, "规则已保存", (backup, path)
+    config_backup = backup_file(CONFIG_FILE, "config")
+    write_config_text(new_config)
+    return True, "规则已保存，并在 DNS 配置里挂上了 force-home.txt", [(backup, path), (config_backup, CONFIG_FILE)]
 
 
 
@@ -3471,7 +3566,7 @@ def apply_synced_rules(rules):
             # 之前已写入的规则先还原，不留下半套同步结果
             restore_rollbacks(rollbacks)
             return False, message
-        rollbacks.append(rollback)
+        rollbacks.extend(rollback_list(rollback))
         applied.append(rule_id)
     if not applied:
         if unchanged:
@@ -4150,6 +4245,9 @@ def api_rules(rule_id):
     # 仍是一个同步请求；timings 让前端显示"校验 x.xs，重启 y.ys"（校验含格式检查、沙箱启动和写文件）
     timings = {"validate_ms": 0, "restart_ms": 0}
     unchanged = rule_content_unchanged(rule_id, content)
+    conflict = "" if unchanged else force_rule_conflict(rule_id, content)
+    if conflict:
+        return jsonify({"success": False, "message": conflict, "sync_job": None, "unchanged": False, "timings": timings})
     if unchanged:
         # 内容等价：不写文件、不备份、不跑沙箱、不重启；但仍推送给其他节点（它们可能还是旧的，已一致的会自己跳过）
         ok, message = True, RULES_UNCHANGED_MESSAGE
@@ -4160,7 +4258,7 @@ def api_rules(rule_id):
         if not saved:
             return jsonify({"success": False, "message": save_message, "sync_job": None, "unchanged": False, "timings": timings})
         started = time.monotonic()
-        result = restart_or_rollback([rollback], "规则已保存并重启 mosdns", "规则已保存")
+        result = restart_or_rollback(rollback_list(rollback), "规则已保存并重启 mosdns", "规则已保存")
         timings["restart_ms"] = elapsed_ms(started)
         ok, message = notify_if_rolled_back(f"{meta['label']}规则修改已回滚", result)
     sync_job = None

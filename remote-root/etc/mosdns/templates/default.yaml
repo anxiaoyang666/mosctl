@@ -1,4 +1,4 @@
-# mosctl-template: 4
+# mosctl-template: 5
 log:
   level: info
   file: "/var/log/mosdns.log"
@@ -41,12 +41,14 @@ plugins:
       files:
         - "/etc/mosdns/rules/force-cn.txt"
 
-  # 强制国外规则，优先级高于 geosite
+  # 强制国外规则，优先级高于 geosite。强制家宽在 DNS 上和强制国外一样走国外上游，
+  # 区别只在 mihomo 那边走「🏠 家宽」策略组，所以两个文件挂在同一个 domain_set 里
   - tag: force_no_cn
     type: domain_set
     args:
       files:
         - "/etc/mosdns/rules/force-nocn.txt"
+        - "/etc/mosdns/rules/force-home.txt"
 
   # 国内域名规则
   - tag: geosite_cn

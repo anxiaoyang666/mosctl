@@ -333,6 +333,15 @@ carry_over_config_values() {
 
 # 从仓库拉取默认配置模板（remote-root/etc/mosdns/templates/default.yaml）覆盖本机 config.yaml，
 # 保留当前上游 DNS 与 TTL；先直连 raw.githubusercontent.com，失败再按 GH_PROXY / GH_MIRRORS 试镜像，最后 jsDelivr
+# 引用了但不存在的本地规则文件补一个空的，避免 mosdns 因找不到文件起不来
+touch_referenced_rules() {
+    local ref
+    mkdir -p /etc/mosdns/rules
+    for ref in $(grep -oE '/etc/mosdns/rules/[A-Za-z0-9_.-]+' "$CONFIG_FILE" 2>/dev/null | sort -u); do
+        [ -e "$ref" ] || touch "$ref"
+    done
+}
+
 sync_config() {
     if [ -z "$REPO_URL" ]; then
         echo -e "${RED}❌ 未配置 MOSCTL_REPO_URL，无法同步配置。请在 /etc/mosdns/.env 中设置你的仓库地址。${PLAIN}"
@@ -361,6 +370,8 @@ sync_config() {
     fi
     install -m 0644 "$tmp" "$CONFIG_FILE"
     rm -f "$tmp"
+    # 新模板可能引用了新的规则文件（如 v5 的 force-home.txt）
+    touch_referenced_rules
 
     if ! systemctl list-units --full -all | grep -q "mosdns.service"; then
         echo -e "${GREEN}✅ 初始配置已写入。 (等待服务启动)${PLAIN}"
@@ -578,11 +589,13 @@ rules_menu() {
     echo "  1. 🏠 自定义 Hosts"
     echo "  2. 🇨🇳 强制走国内 (域名)"
     echo "  3. 🌍 强制走国外 (域名)"
+    echo "  4. 🏡 强制走家宽 (域名，DNS 同强制国外)"
     if [ -t 0 ]; then read -p "请选择: " sub_choice; else echo -n "请选择: "; read sub_choice < /dev/tty; fi
     case "$sub_choice" in
         1) edit_rule "/etc/mosdns/rules/hosts.txt" ;;
         2) edit_rule "/etc/mosdns/rules/force-cn.txt" ;;
         3) edit_rule "/etc/mosdns/rules/force-nocn.txt" ;;
+        4) edit_rule "/etc/mosdns/rules/force-home.txt" ;;
     esac
 }
 
@@ -717,11 +730,7 @@ do_update_geo_rules() {
     if config_uses_rule geosite_apple.txt; then
         dl "/etc/mosdns/rules/geosite_apple.txt" "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt" || return 1
     fi
-    # 引用了但不存在的本地规则文件补一个空的，避免 mosdns 因找不到文件起不来
-    local ref
-    for ref in $(grep -oE '/etc/mosdns/rules/[A-Za-z0-9_.-]+' "$CONFIG_FILE" 2>/dev/null | sort -u); do
-        [ -e "$ref" ] || touch "$ref"
-    done
+    touch_referenced_rules
     systemctl reset-failed mosdns 2>/dev/null
     GEO_FAIL_REASON="规则已下载，但 mosdns 重启失败"
     systemctl restart mosdns || return 1

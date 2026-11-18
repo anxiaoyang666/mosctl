@@ -11,9 +11,9 @@ The Chinese maintainer guide is [README.zh-CN.md](README.zh-CN.md), with [docs/A
 - Install the mosdns binary, systemd units, and the Web panel, then print the URL, username, and password.
 - Five panel pages: 态势总览 (overview), 解析策略 (policy), 运行维护 (operations), 高级配置 (advanced), 系统控制 (control).
 - Edit the domestic upstream, the domestic backup, the foreign upstream, and the cache TTL. Those three upstreams are the lines tagged `TAG_LOCAL`, `TAG_LOCAL_BACKUP`, and `TAG_REMOTE`.
-- Edit force-cn, force-nocn, and hosts rules. A save checks the text and starts mosdns in a sandbox before replacing the live file.
+- Edit force-cn, force-nocn, force-home, and hosts rules. A save checks the text and starts mosdns in a sandbox before replacing the live file.
 - Refresh `geosite_cn.txt` and `geosite_no_cn.txt` from the Loyalsoldier lists, once or on a crontab schedule.
-- Push force-cn / force-nocn rules to other mosctl or mihomo panels at `/api/rule-sync`.
+- Push force-cn / force-nocn / force-home rules to other mosctl or mihomo panels at `/api/rule-sync`.
 - Upgrade the mosdns core and the Mosctl panel. The core is sandbox-tested against the live config and health-checked after replacement; failure restores the previous binary.
 - Daily crontab updates for the core and the panel (`--dry-run`, `--only`, `--manual`).
 - Webhook notifications for auto-update, Geo update failure and recovery, rule-sync apply failure and recovery, and rollback after a config or rule change.
@@ -26,7 +26,7 @@ The Chinese maintainer guide is [README.zh-CN.md](README.zh-CN.md), with [docs/A
 | Piece | What the repo uses |
 | --- | --- |
 | DNS core | Linux release zips from [IrineSistiana/mosdns](https://github.com/IrineSistiana/mosdns), installed to `/usr/local/bin/mosdns`. This repo does not build mosdns. |
-| Web panel | Python 3 and the distro package `python3-flask`. Entry point: `remote-root/etc/mosdns/manager/app.py`. The version constant is `PANEL_VERSION` (currently `0.3.51` in this tree). |
+| Web panel | Python 3 and the distro package `python3-flask`. Entry point: `remote-root/etc/mosdns/manager/app.py`. The version constant is `PANEL_VERSION` (currently `0.3.52` in this tree). |
 | CLI | Bash: `install.sh` and `remote-root/usr/local/bin/mosctl`. |
 | Services | systemd units `mosdns.service`, `mosdns-web.service`, `mosdns-rescue.service`. |
 | Schedules | root's crontab, one line for Geo updates and one for auto-update. |
@@ -119,7 +119,7 @@ Keys:
 - `GH_PROXY`: GitHub proxy prefix tried after a direct download fails. `mosctl` tries this prefix first, then `GH_MIRRORS`, then jsDelivr. The installer and the panel try only this prefix. Set it to an empty string to skip this prefix. A missing key falls back to `https://gh-proxy.com/`
 - `GH_MIRRORS`: extra GitHub proxy prefixes `mosctl` tries after `GH_PROXY` for Geo updates and `mosctl sync`, separated by spaces or commas. Default `https://gh-proxy.com/ https://ghfast.top/`. An empty value adds none. A missing key uses the default. The environment variable overrides `.env`. After those prefixes, `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` is fetched from `https://cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<path>` (Loyalsoldier lists: `https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/<file>`)
 - `GEO_UPDATE_RETRY_DELAY`: seconds `mosctl update` waits before retrying a failed Geo download once. Default `180`, maximum `1800`. `0` retries immediately. A mosdns restart failure is not retried. The environment variable overrides `.env`
-- `RULE_SYNC_ENABLED`: `true` / `false`, push force-cn / force-nocn rule changes to other panels. Only the string `true` (any case) enables it
+- `RULE_SYNC_ENABLED`: `true` / `false`, push force-cn / force-nocn / force-home rule changes to other panels. Only the string `true` (any case) enables it
 - `RULE_SYNC_TOKEN`: shared secret that `/api/rule-sync` checks. The `X-Mosdns-Sync-Token` header wins over a JSON `token`
 - `RULE_SYNC_PEERS`: other mosctl / mihomo panel URLs, separated by `|`. The panel also accepts newlines or commas and prefixes `http://` when the scheme is missing
 - `BACKUP_KEEP_COUNT`: number of config backups to keep (3–200), default `20`. Kernel backups stay at 3 files, and panel directory backups stay at 3, regardless of this value
@@ -143,7 +143,7 @@ After setting a site name and webhook under 运行维护 → 通知 and enabling
 
 ## Rule Sync
 
-When rule sync is enabled, saving the force-cn / force-nocn rules pushes them to every URL in `RULE_SYNC_PEERS`. Hosts are not synced. The push runs in a background thread; the page polls `/api/rule-sync-jobs/<id>`. The local panel URL is skipped. A peer that answers "操作进行中" or HTTP 409 is retried 3 times, 3 seconds apart.
+When rule sync is enabled, saving the force-cn / force-nocn / force-home rules pushes them to every URL in `RULE_SYNC_PEERS`. Hosts are not synced. The push runs in a background thread; the page polls `/api/rule-sync-jobs/<id>`. The local panel URL is skipped. A peer that answers "操作进行中" or HTTP 409 is retried 3 times, 3 seconds apart.
 
 Peers default to plain `http://`, and the sync token travels in a request header in clear text, so only use rule sync on a trusted LAN or put the panels behind HTTPS. The panel shows the same warning (同步密钥会以明文发送，建议仅在可信内网使用) whenever a peer is not `https://`.
 
@@ -186,7 +186,7 @@ Connectivity test posts `{"rules": {}}`. A matching token returns success and do
 
 Runtime paths created on the host, not stored in git: `/usr/local/bin/mosdns`, `/etc/mosdns/config.yaml`, `/etc/mosdns/.env`, `/etc/mosdns/cache.dump`, `/etc/mosdns/backup/`, `/var/log/mosdns.log`, `/var/log/mosctl-update.log`, `/var/log/mosctl-auto-update.log`, `/var/log/mosctl-notify.log`.
 
-The geosite files shipped in `remote-root/etc/mosdns/rules/` are the initial copies. A successful `mosctl update` replaces `geosite_cn.txt` and `geosite_no_cn.txt`. `force-cn.txt`, `force-nocn.txt`, and `hosts.txt` are empty in the repo.
+The geosite files shipped in `remote-root/etc/mosdns/rules/` are the initial copies. A successful `mosctl update` replaces `geosite_cn.txt` and `geosite_no_cn.txt`. `force-cn.txt`, `force-nocn.txt`, `force-home.txt`, and `hosts.txt` are empty in the repo. force-home resolves like force-nocn (foreign upstream, so mihomo hands out a fake IP); on mihomo those domains go to the 🏠 home-broadband group instead of the proxy group.
 
 ## Web panel
 

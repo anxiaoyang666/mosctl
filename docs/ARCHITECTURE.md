@@ -47,12 +47,12 @@ cron
 
 ## DNS 解析顺序
 
-现行模板是 `remote-root/etc/mosdns/templates/default.yaml`，文件头 `# mosctl-template: 4`。`main_sequence` 按这个顺序执行，命中应答就 `accept`：
+现行模板是 `remote-root/etc/mosdns/templates/default.yaml`，文件头 `# mosctl-template: 5`。`main_sequence` 按这个顺序执行，命中应答就 `accept`：
 
 1. `hosts`：`/etc/mosdns/rules/hosts.txt`。默认精确匹配写出的域名；`domain:` 前缀连同子域名。
 2. 拒绝 qtype 65（HTTPS/SVCB）：`reject 0`，回空的 NOERROR，避免客户端用记录里的地址绕过 fake-ip。
 3. `force-cn.txt` 命中则走国内上游 `forward_local`。
-4. `force-nocn.txt` 命中则走国外上游。国外路径先去掉 ECS，再 `prefer_ipv4`。
+4. `force-nocn.txt` 或 `force-home.txt` 命中则走国外上游（两个文件同属 `force_no_cn`）。国外路径先去掉 ECS，再 `prefer_ipv4`。
 5. `geosite_cn.txt` 命中则先查缓存，没有应答再走国内上游。
 6. `geosite_no_cn.txt` 命中则走国外上游。
 7. 其余查询走国外上游。
@@ -114,7 +114,7 @@ cron
 | `GET/POST /api/backups`、`/api/backup-settings`、`POST /api/backups/cleanup` | 列出、恢复、保留数量、清理 |
 | `GET/POST /api/rule-sync-settings`、`POST /api/rule-sync-test` | 同步开关、密钥、节点、连通性 |
 | `POST /api/rule-sync` | 节点间收规则。不走登录，用同步密钥。空 `rules` 对象是连通性探测 |
-| `GET/POST /api/rules/<id>` | `force-cn`、`force-nocn`、`hosts` |
+| `GET/POST /api/rules/<id>` | `force-cn`、`force-nocn`、`force-home`、`hosts` |
 | `GET /api/rule-sync-jobs/<id>` | 后台推送进度，`latest` 表示最近一次 |
 | `GET/POST /api/geo-schedule` | 频率 `daily` `weekly` `every_6h` `every_12h` `disabled` |
 | `GET/POST /api/auto-update`、`POST /api/auto-update/check`、`POST /api/auto-update/run` | 设置、`--dry-run`、后台 `--manual` |
@@ -155,9 +155,15 @@ cron
 
 自动更新里的「立即更新」优先用 `systemd-run` 把 `auto_update.py --manual` 放进临时 unit（`KillMode=process`）。否则面板升级重启 `mosdns-web` 时，留在同一个 cgroup 里的更新进程会被一起杀掉。
 
+## 强制家宽和旧配置
+
+模板 v5 把 `force-home.txt` 加进 `force_no_cn` 的文件列表。已装好的机器 `config.yaml` 还是 v4，面板升级不动它。第一次保存（或收到同步的）强制家宽时，`force_home_config_text()` 在 `force-nocn.txt` 那一行后面补一行 `force-home.txt`，缩进和引号照抄；补好的配置和候选规则文件一起进沙盒，通过后先备份配置（`config.<时间>.bak`）再写入，重启失败时规则文件和配置一起回滚。找不到 `force-nocn.txt` 那一行时不保存，提示先迁移模板。
+
+面板升级不覆盖 `rules/`，所以面板启动和「迁移到最新模板」前都会把缺的规则文件补成空文件；`mosctl sync` 写入新模板后也会补。
+
 ## 规则同步协议
 
-开启同步后，保存 `force-cn` 或 `force-nocn` 会 POST：
+开启同步后，保存 `force-cn`、`force-nocn` 或 `force-home` 会 POST：
 
 ```http
 POST /api/rule-sync
@@ -167,7 +173,7 @@ X-Mosdns-Sync-Token: <RULE_SYNC_TOKEN>
 {"token":"<同一密钥>","rules":{"force-cn":"<文件全文>"},"source":"http://本机面板"}
 ```
 
-对端用 `compare_digest` 核对密钥，忽略不在 `force-cn` / `force-nocn` 里的键。内容与本地等价时不写文件、不重启。有变化时走上面的沙盒和回滚。应用失败或从失败恢复时发通知，状态键是 `rule-sync`。
+对端用 `compare_digest` 核对密钥，忽略不在 `force-cn` / `force-nocn` / `force-home` 里的键。内容与本地等价时不写文件、不重启。有变化时走上面的沙盒和回滚。应用失败或从失败恢复时发通知，状态键是 `rule-sync`。
 
 连通性测试发送 `"rules": {}`。对端返回「接口可访问，密钥已通过」，不记失败。
 

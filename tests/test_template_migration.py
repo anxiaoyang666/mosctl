@@ -88,7 +88,7 @@ class TemplateFileTest(unittest.TestCase):
         self.text = TEMPLATE.read_text(encoding="utf-8")
 
     def test_template_starts_with_version_marker(self):
-        self.assertEqual(self.text.splitlines()[0], "# mosctl-template: 4")
+        self.assertEqual(self.text.splitlines()[0], "# mosctl-template: 5")
 
     def test_https_records_rejected_right_after_hosts(self):
         block = plugin_block(self.text, "reject_https_record")
@@ -154,13 +154,13 @@ class AppBackupUpstreamTest(unittest.TestCase):
         self.config.write_text(OLD_CONFIG, encoding="utf-8")
         status = self.app.api_status()
         self.assertEqual(status["config_template_version"], 0)
-        self.assertEqual(status["latest_template_version"], 4)
+        self.assertEqual(status["latest_template_version"], 5)
         self.assertTrue(status["config_outdated"])
         self.assertEqual(status["local_dns_backup"], "")
 
         shutil.copy(TEMPLATE, self.config)
         status = self.app.api_status()
-        self.assertEqual(status["config_template_version"], 4)
+        self.assertEqual(status["config_template_version"], 5)
         self.assertFalse(status["config_outdated"])
         self.assertEqual(status["local_dns_backup"], "223.5.5.5")
         self.assertEqual(status["local_dns_backup_raw"], "udp://223.5.5.5")
@@ -238,7 +238,7 @@ class AppBackupUpstreamTest(unittest.TestCase):
             {"local": "udp://119.29.29.29", "local_backup": "", "remote": "192.168.10.101:53", "ttl": "86400"},
         )
         text = self.config.read_text(encoding="utf-8")
-        self.assertEqual(self.app.template_version(text), 4)
+        self.assertEqual(self.app.template_version(text), 5)
         self.assertIn('- addr: "udp://119.29.29.29" # TAG_LOCAL\n', text)
         self.assertIn('- addr: "udp://223.5.5.5" # TAG_LOCAL_BACKUP\n', text)
         self.assertIn('- addr: "192.168.10.101:53" # TAG_REMOTE\n', text)
@@ -286,7 +286,7 @@ class AppBackupUpstreamTest(unittest.TestCase):
         self.config.write_text(OLD_CONFIG, encoding="utf-8")
         ok, message = self.app.restore_default_template()
         self.assertTrue(ok, message)
-        self.assertEqual(self.app.template_version(self.config.read_text(encoding="utf-8")), 4)
+        self.assertEqual(self.app.template_version(self.config.read_text(encoding="utf-8")), 5)
 
 
 def cli_functions(*names):
@@ -332,7 +332,7 @@ class CliBackupUpstreamTest(unittest.TestCase):
                     "udp://119.29.29.29", "udp://223.5.5.5",
                     "udp://1.1.1.1", "udp://223.5.5.5",
                     "udp://1.1.1.1", "udp://114.114.114.114",
-                    "4",
+                    "5",
                 ],
             )
 

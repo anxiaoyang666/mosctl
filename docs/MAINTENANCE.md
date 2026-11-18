@@ -54,9 +54,10 @@ mosctl cache-ttl 3600
 | --- | --- | --- |
 | `force-cn` | `/etc/mosdns/rules/force-cn.txt` | 每行一个域名，可加 `full:`、`keyword:`、`regexp:`。同步到 mihomo 时 `keyword:` 和 `regexp:` 不生效，`full:` 会连同子域名一起匹配 |
 | `force-nocn` | `/etc/mosdns/rules/force-nocn.txt` | 同上 |
+| `force-home` | `/etc/mosdns/rules/force-home.txt` | 同上。DNS 和 `force-nocn` 一样，挂在模板 v5 的 `force_no_cn` 里；和另外两个强制列表写同一个域名时，本机保存会拒绝 |
 | `hosts` | `/etc/mosdns/rules/hosts.txt` | `域名 IP`，可写多个 IP。`domain:` 前缀才匹配子域名。不同步 |
 
-`force-cn` 和 `force-nocn` 在去掉注释、空行、重复项和顺序，并忽略大小写（`regexp:` 除外）以及可有可无的 `domain:` 前缀之后，若与当前文件相同，则不写盘、不重启，但仍会按同步设置推送。`hosts` 不走这套比较。格式不合法或沙盒启动失败时，正式文件不变。
+`force-cn`、`force-nocn`、`force-home` 在去掉注释、空行、重复项和顺序，并忽略大小写（`regexp:` 除外）以及可有可无的 `domain:` 前缀之后，若与当前文件相同，则不写盘、不重启，但仍会按同步设置推送。`hosts` 不走这套比较。格式不合法或沙盒启动失败时，正式文件不变。
 
 直接改 `/etc/mosdns/config.yaml` 后执行 `systemctl restart mosdns`。面板里的编辑器会先沙盒再重启，手改文件没有这一步。改坏到连续启动失败时，`mosdns-rescue.service` 会打开救援模式。
 
